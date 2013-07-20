@@ -72,6 +72,17 @@ struct tcp_sack_block {
 	u32	end_seq;
 };
 
+struct tcp_out_options {
+	u16	options;	/* bit field of OPTION_* */
+	u8	ws;		/* window scale, 0 to disable */
+	u8	num_sack_blocks;/* number of SACK blocks to include */
+	u8	hash_size;	/* bytes in hash_location */
+	u16	mss;		/* 0 to disable */
+	__u8	*hash_location;	/* temporary pointer, overloaded */
+	__u32	tsval, tsecr;	/* need to include OPTION_TS */
+	struct tcp_fastopen_cookie *fastopen_cookie;	/* Fast open cookie */
+};
+
 /*These are used to set the sack_ok field in struct tcp_options_received */
 #define TCP_SACK_SEEN     (1 << 0)   /*1 = peer is SACK capable, */
 #define TCP_FACK_ENABLED  (1 << 1)   /*1 = FACK is enabled locally*/
