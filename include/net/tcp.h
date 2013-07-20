@@ -234,6 +234,26 @@ void tcp_time_wait(struct sock *sk, int state, int timeo);
  */
 #define	TFO_SERVER_ALWAYS	0x1000
 
+/* Flags from tcp_input.c for tcp_ack */
+#define FLAG_DATA               0x01 /* Incoming frame contained data.          */
+#define FLAG_WIN_UPDATE         0x02 /* Incoming ACK was a window update.       */
+#define FLAG_DATA_ACKED         0x04 /* This ACK acknowledged new data.         */
+#define FLAG_RETRANS_DATA_ACKED 0x08 /* "" "" some of which was retransmitted.  */
+#define FLAG_SYN_ACKED          0x10 /* This ACK acknowledged SYN.              */
+#define FLAG_DATA_SACKED        0x20 /* New SACK.                               */
+#define FLAG_ECE                0x40 /* ECE in this ACK                         */
+#define FLAG_SLOWPATH           0x100 /* Do not skip RFC checks for window update.*/
+#define FLAG_ORIG_SACK_ACKED    0x200 /* Never retransmitted data are (s)acked  */
+#define FLAG_SND_UNA_ADVANCED   0x400 /* Snd_una was changed (!= FLAG_DATA_ACKED) */
+#define FLAG_DSACKING_ACK       0x800 /* SACK blocks contained D-SACK info */
+#define FLAG_SACK_RENEGING      0x2000 /* snd_una advanced to a sacked seq */
+#define FLAG_UPDATE_TS_RECENT   0x4000 /* tcp_replace_ts_recent() */
+
+#define FLAG_ACKED              (FLAG_DATA_ACKED|FLAG_SYN_ACKED)
+#define FLAG_NOT_DUP            (FLAG_DATA|FLAG_WIN_UPDATE|FLAG_ACKED)
+#define FLAG_CA_ALERT           (FLAG_DATA_SACKED|FLAG_ECE)
+#define FLAG_FORWARD_PROGRESS   (FLAG_ACKED|FLAG_DATA_SACKED)
+
 extern struct inet_timewait_death_row tcp_death_row;
 
 /* sysctl variables for tcp */
@@ -349,6 +369,85 @@ extern struct proto tcp_prot;
 #define TCP_ADD_STATS_USER(net, field, val) SNMP_ADD_STATS_USER((net)->mib.tcp_statistics, field, val)
 #define TCP_ADD_STATS(net, field, val)	SNMP_ADD_STATS((net)->mib.tcp_statistics, field, val)
 
+/**** START - Exports needed for MPTCP ****/
+extern const struct inet_connection_sock_af_ops ipv4_specific;
+
+struct mptcp_options_received;
+
+int tcp_close_state(struct sock *sk);
+void tcp_push(struct sock *sk, int flags, int mss_now, int nonagle,
+	      int size_goal);
+int tcp_xmit_probe_skb(struct sock *sk, int urgent);
+void tcp_cwnd_validate(struct sock *sk);
+void tcp_event_new_data_sent(struct sock *sk, const struct sk_buff *skb);
+int tcp_transmit_skb(struct sock *sk, struct sk_buff *skb, int clone_it,
+		     gfp_t gfp_mask);
+unsigned int tcp_mss_split_point(const struct sock *sk, const struct sk_buff *skb,
+				 unsigned int mss_now, unsigned int max_segs,
+				 int nonagle);
+bool tcp_tso_should_defer(struct sock *sk, struct sk_buff *skb);
+bool tcp_nagle_test(const struct tcp_sock *tp, const struct sk_buff *skb,
+		    unsigned int cur_mss, int nonagle);
+bool tcp_snd_wnd_test(const struct tcp_sock *tp, const struct sk_buff *skb,
+		      unsigned int cur_mss);
+unsigned int tcp_cwnd_test(const struct tcp_sock *tp,
+			   const struct sk_buff *skb);
+int tcp_mtu_probe(struct sock *sk);
+int tcp_init_tso_segs(const struct sock *sk, struct sk_buff *skb,
+		      unsigned int mss_now);
+void __pskb_trim_head(struct sk_buff *skb, int len);
+void tcp_queue_skb(struct sock *sk, struct sk_buff *skb);
+void tcp_init_nondata_skb(struct sk_buff *skb, u32 seq, u8 flags);
+void tcp_reset(struct sock *sk);
+bool tcp_may_update_window(const struct tcp_sock *tp, const u32 ack,
+			   const u32 ack_seq, const u32 nwin);
+bool tcp_urg_mode(const struct tcp_sock *tp);
+void tcp_ack_probe(struct sock *sk);
+void tcp_rearm_rto(struct sock *sk);
+int tcp_write_timeout(struct sock *sk);
+bool retransmits_timed_out(struct sock *sk, unsigned int boundary,
+			   unsigned int timeout, bool syn_set);
+void tcp_write_err(struct sock *sk);
+void tcp_adjust_pcount(struct sock *sk, const struct sk_buff *skb, int decr);
+void tcp_set_skb_tso_segs(const struct sock *sk, struct sk_buff *skb,
+			  unsigned int mss_now);
+
+int tcp_v4_rtx_synack(struct sock *sk, struct request_sock *req);
+void tcp_v4_reqsk_send_ack(struct sock *sk, struct sk_buff *skb,
+			   struct request_sock *req);
+__u32 tcp_v4_init_sequence(const struct sk_buff *skb);
+int tcp_v4_send_synack(struct sock *sk, struct dst_entry *dst,
+		       struct request_sock *req, u16 queue_mapping);
+void tcp_v4_send_reset(struct sock *sk, struct sk_buff *skb);
+struct ip_options_rcu *tcp_v4_save_options(struct sk_buff *skb);
+struct sock *tcp_v4_hnd_req(struct sock *sk, struct sk_buff *skb);
+void tcp_v4_reqsk_destructor(struct request_sock *req);
+
+void sock_valbool_flag(struct sock *sk, int bit, int valbool);
+unsigned int tcp_xmit_size_goal(struct sock *sk, u32 mss_now,
+				int large_allowed);
+u32 tcp_tso_acked(struct sock *sk, struct sk_buff *skb);
+
+void skb_clone_fraglist(struct sk_buff *skb);
+void copy_skb_header(struct sk_buff *new, const struct sk_buff *old);
+
+void inet_twsk_free(struct inet_timewait_sock *tw);
+/* These states need RST on ABORT according to RFC793 */
+static inline bool tcp_need_reset(int state)
+{
+	return (1 << state) &
+	       (TCPF_ESTABLISHED | TCPF_CLOSE_WAIT | TCPF_FIN_WAIT1 |
+		TCPF_FIN_WAIT2 | TCPF_SYN_RECV);
+}
+
+bool tcp_dma_try_early_copy(struct sock *sk, struct sk_buff *skb,
+			    int hlen);
+int __must_check tcp_queue_rcv(struct sock *sk, struct sk_buff *skb, int hdrlen,
+			       bool *fragstolen);
+bool tcp_try_coalesce(struct sock *sk, struct sk_buff *to,
+		      struct sk_buff *from, bool *fragstolen);
+/**** END - Exports needed for MPTCP ****/
+
 void tcp_tasklet_init(void);
 
 void tcp_v4_err(struct sk_buff *skb, u32);
@@ -445,6 +544,7 @@ int tcp_recvmsg(struct kiocb *iocb, struct sock *sk, struct msghdr *msg,
 		size_t len, int nonblock, int flags, int *addr_len);
 void tcp_parse_options(const struct sk_buff *skb,
 		       struct tcp_options_received *opt_rx,
+		       struct mptcp_options_received *mopt_rx,
 		       int estab, struct tcp_fastopen_cookie *foc);
 const u8 *tcp_parse_md5sig_option(const struct tcphdr *th);
 
@@ -1057,7 +1157,7 @@ u32 tcp_default_init_rwnd(u32 mss);
 /* Determine a window scaling and initial window to offer. */
 void tcp_select_initial_window(int __space, __u32 mss, __u32 *rcv_wnd,
 			       __u32 *window_clamp, int wscale_ok,
-			       __u8 *rcv_wscale, __u32 init_rcv_wnd);
+			       __u8 *rcv_wscale, __u32 init_rcv_wnd, const struct sock *sk);
 
 static inline int tcp_win_from_space(int space)
 {
