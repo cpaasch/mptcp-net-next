@@ -531,7 +531,8 @@ static int mptcp_pm_netdev_event(struct notifier_block *this,
 	struct net_device *dev = netdev_notifier_info_to_dev(ptr);
 	struct in_device *in_dev;
 
-	if (!(event == NETDEV_UP || event == NETDEV_CHANGE))
+	if (!(event == NETDEV_UP || event == NETDEV_DOWN ||
+	      event == NETDEV_CHANGE))
 		return NOTIFY_DONE;
 
 	/* Iterate over the addresses of the interface, then we go over the
@@ -556,6 +557,7 @@ void mptcp_pm_addr4_event_handler(struct in_ifaddr *ifa, unsigned long event,
 				  struct mptcp_cb *mpcb)
 {
 	int i;
+	struct sock *sk, *tmpsk;
 
 	if (ifa->ifa_scope > RT_SCOPE_LINK)
 		return;
@@ -563,7 +565,7 @@ void mptcp_pm_addr4_event_handler(struct in_ifaddr *ifa, unsigned long event,
 	/* Look for the address among the local addresses */
 	mptcp_for_each_bit_set(mpcb->loc4_bits, i) {
 		if (mpcb->locaddr4[i].addr.s_addr == ifa->ifa_local)
-			return;
+			goto found;
 	}
 
 	/* Not yet in address-list */
@@ -583,6 +585,33 @@ void mptcp_pm_addr4_event_handler(struct in_ifaddr *ifa, unsigned long event,
 		mptcp_create_subflows(mpcb->meta_sk);
 	}
 	return;
+found:
+	/* Address already in list. Reactivate/Deactivate the
+	 * concerned paths.
+	 */
+	mptcp_for_each_sk_safe(mpcb, sk, tmpsk) {
+		if (sk->sk_family != AF_INET ||
+		    inet_sk(sk)->inet_saddr != ifa->ifa_local)
+			continue;
+
+		if (event == NETDEV_DOWN) {
+			mptcp_reinject_data(sk, 0);
+			mptcp_sub_force_close(sk);
+		}
+	}
+
+	if (event == NETDEV_DOWN) {
+		mpcb->loc4_bits &= ~(1 << i);
+
+		/* Force sending directly the REMOVE_ADDR option */
+		mpcb->remove_addrs |= (1 << mpcb->locaddr4[i].id);
+		sk = mptcp_select_ack_sock(mpcb->meta_sk, 0);
+		if (sk)
+			tcp_send_ack(sk);
+
+		mptcp_for_each_bit_set(mpcb->rem4_bits, i)
+			mpcb->remaddr4[i].bitfield &= mpcb->loc4_bits;
+	}
 }
 
 /* Send ADD_ADDR for loc_id on all available subflows */
