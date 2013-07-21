@@ -277,8 +277,11 @@ void mptcp_set_addresses(struct sock *meta_sk)
 
 				if ((meta_sk->sk_family == AF_INET ||
 				     mptcp_v6_is_v4_mapped(meta_sk)) &&
-				    inet_sk(meta_sk)->inet_saddr == ifa_address)
+				    inet_sk(meta_sk)->inet_saddr == ifa_address) {
+					mpcb->locaddr4[0].low_prio = dev->flags &
+								IFF_MPBACKUP ? 1 : 0;
 					continue;
+				}
 
 				i = __mptcp_find_free_index(mpcb->loc4_bits, -1,
 							    mpcb->next_v4_index);
@@ -288,6 +291,8 @@ void mptcp_set_addresses(struct sock *meta_sk)
 				mpcb->locaddr4[i].addr.s_addr = ifa_address;
 				mpcb->locaddr4[i].port = 0;
 				mpcb->locaddr4[i].id = i;
+				mpcb->locaddr4[i].low_prio = (dev->flags & IFF_MPBACKUP) ?
+								1 : 0;
 				mpcb->loc4_bits |= (1 << i);
 				mpcb->next_v4_index = i + 1;
 				mptcp_v4_send_add_addr(i, mpcb);

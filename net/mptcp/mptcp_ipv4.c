@@ -473,6 +473,7 @@ int mptcp_init4_subsockets(struct sock *meta_sk, const struct mptcp_loc4 *loc,
 		goto error;
 
 	tp->mptcp->slave_sk = 1;
+	tp->mptcp->low_prio = loc->low_prio;
 
 	/* Initializing the timer for an MPTCP subflow */
 	setup_timer(&tp->mptcp->mptcp_ack_timer, mptcp_ack_handler, (unsigned long)sk);
@@ -591,6 +592,7 @@ found:
 	 * concerned paths.
 	 */
 	mptcp_for_each_sk_safe(mpcb, sk, tmpsk) {
+		struct tcp_sock *tp = tcp_sk(sk);
 		if (sk->sk_family != AF_INET ||
 		    inet_sk(sk)->inet_saddr != ifa->ifa_local)
 			continue;
@@ -598,6 +600,12 @@ found:
 		if (event == NETDEV_DOWN) {
 			mptcp_reinject_data(sk, 0);
 			mptcp_sub_force_close(sk);
+		} else if (event == NETDEV_CHANGE) {
+			int new_low_prio = (ifa->ifa_dev->dev->flags & IFF_MPBACKUP) ?
+						1 : 0;
+			if (new_low_prio != tp->mptcp->low_prio)
+				tp->mptcp->send_mp_prio = 1;
+			tp->mptcp->low_prio = new_low_prio;
 		}
 	}
 
