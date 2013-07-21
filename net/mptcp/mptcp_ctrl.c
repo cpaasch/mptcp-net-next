@@ -911,6 +911,7 @@ void mptcp_update_metasocket(struct sock *sk, struct sock *meta_sk)
 	mpcb->locaddr4[0].addr.s_addr = inet_sk(sk)->inet_saddr;
 	mpcb->locaddr4[0].id = 0;
 	mpcb->locaddr4[0].port = 0;
+	mpcb->locaddr4[0].low_prio = 0;
 	mpcb->loc4_bits |= 1;
 	mpcb->next_v4_index = 1;
 
@@ -920,6 +921,9 @@ void mptcp_update_metasocket(struct sock *sk, struct sock *meta_sk)
 	mptcp_v4_set_init_addr_bit(mpcb, inet_sk(sk)->inet_daddr);
 
 	mptcp_set_addresses(meta_sk);
+
+	tcp_sk(sk)->mptcp->low_prio = mpcb->locaddr4[0].low_prio;
+	tcp_sk(sk)->mptcp->send_mp_prio = tcp_sk(sk)->mptcp->low_prio;
 }
 
 /* Clean up the receive buffer for full frames taken by the user,
