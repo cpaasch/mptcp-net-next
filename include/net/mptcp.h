@@ -136,7 +136,9 @@ struct mptcp_tcp_sock {
 		include_mpc:1,
 		mapping_present:1,
 		map_data_fin:1,
+		low_prio:1, /* use this socket as backup */
 		rcv_low_prio:1, /* Peer sent low-prio option to us */
+		send_mp_prio:1, /* Trigger to send mp_prio on this socket */
 		pre_established:1; /* State between sending 3rd ACK and
 				    * receiving the fourth ack of new subflows.
 				    */
@@ -358,6 +360,7 @@ struct mptcp_cb {
 #define OPTION_MP_FAIL		(1 << 7)
 #define OPTION_MP_FCLOSE	(1 << 8)
 #define OPTION_REMOVE_ADDR	(1 << 9)
+#define OPTION_MP_PRIO		(1 << 10)
 
 struct mptcp_option {
 	__u8	kind;
