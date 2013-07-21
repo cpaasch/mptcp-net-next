@@ -615,9 +615,10 @@ void mptcp_create_subflows(struct sock *meta_sk)
 void mptcp_address_worker(struct work_struct *work)
 {
 	struct mptcp_cb *mpcb = container_of(work, struct mptcp_cb, address_work);
-	struct sock *meta_sk = mpcb->meta_sk;
+	struct sock *meta_sk = mpcb->meta_sk, *sk, *tmpsk;
 	struct net *netns = sock_net(meta_sk);
 	struct net_device *dev;
+	int i;
 
 	mutex_lock(&mpcb->mutex);
 	lock_sock(meta_sk);
@@ -643,13 +644,13 @@ void mptcp_address_worker(struct work_struct *work)
 			continue;
 
 		if (!in_dev)
-			break;
+			goto second;
 
 		for (ifa = in_dev->ifa_list; ifa; ifa = ifa->ifa_next) {
 			unsigned long event;
 
 			if (!netif_running(in_dev->dev)) {
-				continue;
+				event = NETDEV_DOWN;
 			} else {
 				/* If it's up, it may have been changed or came up.
 				 * We set NETDEV_CHANGE, to take the good
@@ -660,6 +661,58 @@ void mptcp_address_worker(struct work_struct *work)
 
 			mptcp_pm_addr4_event_handler(ifa, event, mpcb);
 		}
+	}
+
+second:
+	/* Second, we iterate over our local addresses and check if they
+	 * still exist in the interface-list.
+	 */
+
+	/* MPCB-Local IPv4 Addresses */
+	mptcp_for_each_bit_set(mpcb->loc4_bits, i) {
+		int j;
+
+		for_each_netdev(netns, dev) {
+			struct in_device *in_dev = __in_dev_get_rcu(dev);
+			struct in_ifaddr *ifa;
+
+			if (dev->flags & IFF_LOOPBACK || !in_dev)
+				continue;
+
+			for (ifa = in_dev->ifa_list; ifa; ifa = ifa->ifa_next) {
+				if (ifa->ifa_address == mpcb->locaddr4[i].addr.s_addr &&
+				    netif_running(dev))
+					goto next_loc_addr;
+			}
+		}
+
+		/* We did not find the address or the interface became NOMULTIPATH.
+		 * We thus have to remove it.
+		 */
+
+		/* Look for the socket and remove him */
+		mptcp_for_each_sk_safe(mpcb, sk, tmpsk) {
+			if (sk->sk_family != AF_INET ||
+			    inet_sk(sk)->inet_saddr != mpcb->locaddr4[i].addr.s_addr)
+				continue;
+
+			mptcp_reinject_data(sk, 0);
+			mptcp_sub_force_close(sk);
+		}
+
+		/* Now, remove the address from the local ones */
+		mpcb->loc4_bits &= ~(1 << i);
+
+		mpcb->remove_addrs |= (1 << mpcb->locaddr4[i].id);
+		sk = mptcp_select_ack_sock(meta_sk, 0);
+		if (sk)
+			tcp_send_ack(sk);
+
+		mptcp_for_each_bit_set(mpcb->rem4_bits, j)
+			mpcb->remaddr4[j].bitfield &= mpcb->loc4_bits;
+
+next_loc_addr:
+		continue; /* necessary here due to the previous label */
 	}
 
 	read_unlock_bh(&dev_base_lock);
@@ -688,7 +741,8 @@ int mptcp_pm_addr_event_handler(unsigned long event, void *ptr, int family)
 	struct tcp_sock *meta_tp;
 	int i;
 
-	if (!(event == NETDEV_UP || event == NETDEV_CHANGE))
+	if (!(event == NETDEV_UP || event == NETDEV_DOWN ||
+	      event == NETDEV_CHANGE))
 		return NOTIFY_DONE;
 
 	if (sysctl_mptcp_ndiffports > 1)
