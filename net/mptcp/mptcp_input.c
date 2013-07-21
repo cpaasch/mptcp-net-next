@@ -1255,6 +1255,28 @@ void mptcp_clean_rtx_infinite(struct sk_buff *skb, struct sock *sk)
 
 /**** static functions used by mptcp_parse_options */
 
+static inline int mptcp_rem_raddress(struct mptcp_cb *mpcb, u8 rem_id)
+{
+	if (mptcp_v4_rem_raddress(mpcb, rem_id) < 0)
+		return -1;
+	return 0;
+}
+
+static void mptcp_send_reset_rem_id(const struct mptcp_cb *mpcb, u8 rem_id)
+{
+	struct sock *sk_it, *tmpsk;
+
+	mptcp_for_each_sk_safe(mpcb, sk_it, tmpsk) {
+		if (tcp_sk(sk_it)->mptcp->rem_id == rem_id) {
+			mptcp_reinject_data(sk_it, 0);
+			sk_it->sk_err = ECONNRESET;
+			if (tcp_need_reset(sk_it->sk_state))
+				tcp_send_active_reset(sk_it, GFP_ATOMIC);
+			mptcp_sub_force_close(sk_it);
+		}
+	}
+}
+
 void mptcp_parse_options(const uint8_t *ptr, int opsize,
 			 struct tcp_options_received *opt_rx,
 			 struct mptcp_options_received *mopt,
@@ -1408,6 +1430,17 @@ void mptcp_parse_options(const uint8_t *ptr, int opsize,
 		mopt->add_addr_ptr = ptr;
 		break;
 	}
+	case MPTCP_SUB_REMOVE_ADDR:
+		if ((opsize - MPTCP_SUB_LEN_REMOVE_ADDR) < 0)
+			break;
+
+		if (mopt->saw_rem_addr) {
+			mopt->more_rem_addr = 1;
+			break;
+		}
+		mopt->saw_rem_addr = 1;
+		mopt->rem_addr_ptr = ptr;
+		break;
 	case MPTCP_SUB_FAIL:
 		if (opsize != MPTCP_SUB_LEN_FAIL)
 			break;
@@ -1463,6 +1496,19 @@ static void mptcp_handle_add_addr(const unsigned char *ptr, struct sock *sk)
 	}
 }
 
+static void mptcp_handle_rem_addr(const unsigned char *ptr, struct sock *sk)
+{
+	struct mp_remove_addr *mprem = (struct mp_remove_addr *)ptr;
+	int i;
+	u8 rem_id;
+
+	for (i = 0; i <= mprem->len - MPTCP_SUB_LEN_REMOVE_ADDR; i++) {
+		rem_id = (&mprem->addrs_id)[i];
+		if (!mptcp_rem_raddress(tcp_sk(sk)->mpcb, rem_id))
+			mptcp_send_reset_rem_id(tcp_sk(sk)->mpcb, rem_id);
+	}
+}
+
 static void mptcp_parse_addropt(const struct sk_buff *skb, struct sock *sk)
 {
 	struct tcphdr *th = tcp_hdr(skb);
@@ -1494,6 +1540,13 @@ static void mptcp_parse_addropt(const struct sk_buff *skb, struct sock *sk)
 					goto cont;
 
 				mptcp_handle_add_addr(ptr, sk);
+			}
+			if (opcode == TCPOPT_MPTCP &&
+			    ((struct mptcp_option *)ptr)->sub == MPTCP_SUB_REMOVE_ADDR) {
+				if ((opsize - MPTCP_SUB_LEN_REMOVE_ADDR) < 0)
+					goto cont;
+
+				mptcp_handle_rem_addr(ptr, sk);
 			}
 cont:
 			ptr += opsize - 2;
@@ -1599,16 +1652,20 @@ int mptcp_handle_options(struct sock *sk, const struct tcphdr *th, struct sk_buf
 		mopt->join_ack = 0;
 	}
 
-	if (mopt->saw_add_addr) {
-		if (mopt->more_add_addr) {
+	if (mopt->saw_add_addr || mopt->saw_rem_addr) {
+		if (mopt->more_add_addr || mopt->more_rem_addr) {
 			mptcp_parse_addropt(skb, sk);
 		} else {
 			if (mopt->saw_add_addr)
 				mptcp_handle_add_addr(mopt->add_addr_ptr, sk);
+			if (mopt->saw_rem_addr)
+				mptcp_handle_rem_addr(mopt->rem_addr_ptr, sk);
 		}
 
 		mopt->more_add_addr = 0;
 		mopt->saw_add_addr = 0;
+		mopt->more_rem_addr = 0;
+		mopt->saw_rem_addr = 0;
 	}
 
 	mptcp_data_ack(sk, skb);
