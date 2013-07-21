@@ -683,6 +683,9 @@ int inet_accept(struct socket *sock, struct socket *newsock, int flags)
 	if (sk2->sk_protocol == IPPROTO_TCP && tcp_sk(sk2)->mpc) {
 		struct sock *sk_it = sk2;
 
+		mptcp_for_each_sk(tcp_sk(sk2)->mpcb, sk_it)
+			sock_rps_record_flow(sk_it);
+
 		if (tcp_sk(sk2)->mpcb->master_sk) {
 			sk_it = tcp_sk(sk2)->mpcb->master_sk;
 
