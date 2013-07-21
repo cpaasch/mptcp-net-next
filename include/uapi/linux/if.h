@@ -109,6 +109,7 @@ enum net_device_flags {
 #define IFF_DORMANT			IFF_DORMANT
 #define IFF_ECHO			IFF_ECHO
 
+#define IFF_NOMULTIPATH	0x80000		/* Disable for MPTCP 		*/
 #define IFF_MPBACKUP	0x100000	/* Use as backup path for MPTCP */
 
 #define IFF_VOLATILE	(IFF_LOOPBACK|IFF_POINTOPOINT|IFF_BROADCAST|IFF_ECHO|\
