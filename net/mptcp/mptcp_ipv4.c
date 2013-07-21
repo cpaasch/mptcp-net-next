@@ -368,6 +368,7 @@ int mptcp_v4_do_rcv(struct sock *meta_sk, struct sk_buff *skb)
 		goto discard;
 
 	if (child != meta_sk) {
+		sock_rps_save_rxhash(child, skb);
 		/* We don't call tcp_child_process here, because we hold
 		 * already the meta-sk-lock and are sure that it is not owned
 		 * by the user.
