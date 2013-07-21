@@ -210,6 +210,8 @@ struct mptcp_cb {
 
 	struct sk_buff_head reinject_queue;
 
+	u16 remove_addrs;
+
 	u8 dfin_path_index;
 	/* Worker struct for subflow establishment */
 	struct work_struct subflow_work;
@@ -343,6 +345,7 @@ struct mptcp_cb {
 #define OPTION_MP_JOIN		(1 << 6)
 #define OPTION_MP_FAIL		(1 << 7)
 #define OPTION_MP_FCLOSE	(1 << 8)
+#define OPTION_REMOVE_ADDR	(1 << 9)
 
 struct mptcp_option {
 	__u8	kind;
