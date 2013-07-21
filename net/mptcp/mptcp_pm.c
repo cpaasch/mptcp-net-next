@@ -265,7 +265,7 @@ void mptcp_set_addresses(struct sock *meta_sk)
 			struct in_ifaddr *ifa;
 			__be32 ifa_address;
 
-			if (dev->flags & IFF_LOOPBACK)
+			if (dev->flags & (IFF_LOOPBACK | IFF_NOMULTIPATH))
 				continue;
 
 			if (!in_dev)
@@ -655,7 +655,7 @@ void mptcp_address_worker(struct work_struct *work)
 		struct in_device *in_dev = __in_dev_get_rcu(dev);
 		struct in_ifaddr *ifa;
 
-		if (dev->flags & IFF_LOOPBACK)
+		if (dev->flags & (IFF_LOOPBACK | IFF_NOMULTIPATH))
 			continue;
 
 		if (!in_dev)
@@ -691,7 +691,8 @@ second:
 			struct in_device *in_dev = __in_dev_get_rcu(dev);
 			struct in_ifaddr *ifa;
 
-			if (dev->flags & IFF_LOOPBACK || !in_dev)
+			if (dev->flags & (IFF_LOOPBACK | IFF_NOMULTIPATH) ||
+			    !in_dev)
 				continue;
 
 			for (ifa = in_dev->ifa_list; ifa; ifa = ifa->ifa_next) {
