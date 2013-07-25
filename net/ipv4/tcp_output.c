@@ -37,6 +37,7 @@
 #define pr_fmt(fmt) "TCP: " fmt
 
 #include <net/mptcp.h>
+#include <net/ipv6.h>
 #include <net/tcp.h>
 
 #include <linux/compiler.h>
