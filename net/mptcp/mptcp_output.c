@@ -143,9 +143,10 @@ static struct sock *get_available_subflow(struct sock *meta_sk,
 					  unsigned int *mss_now)
 {
 	struct mptcp_cb *mpcb = tcp_sk(meta_sk)->mpcb;
-	struct sock *sk, *bestsk = NULL, *backupsk = NULL;
-	unsigned int mss = 0, mss_backup = 0;
-	u32 min_time_to_peer = 0xffffffff;
+	struct sock *sk, *bestsk = NULL, *lowpriosk = NULL, *backupsk = NULL;
+	unsigned int mss = 0, mss_lowprio = 0, mss_backup = 0;
+	u32 min_time_to_peer = 0xffffffff, lowprio_min_time_to_peer = 0xffffffff;
+	int cnt_backups = 0;
 
 	/* if there is only one subflow, bypass the scheduling function */
 	if (mpcb->cnt_subflows == 1) {
@@ -170,7 +171,27 @@ static struct sock *get_available_subflow(struct sock *meta_sk,
 		struct tcp_sock *tp = tcp_sk(sk);
 		int this_mss;
 
-		if (tp->srtt < min_time_to_peer &&
+		if (tp->mptcp->rcv_low_prio)
+			cnt_backups++;
+
+		if (tp->mptcp->rcv_low_prio &&
+		    tp->srtt < lowprio_min_time_to_peer &&
+		    !(skb && mptcp_pi_to_flag(tp->mptcp->path_index) & TCP_SKB_CB(skb)->path_mask)) {
+
+			if (!mptcp_is_available(sk, skb, &this_mss))
+				continue;
+
+			if (mptcp_dont_reinject_skb(tp, skb)) {
+				mss_backup = this_mss;
+				backupsk = sk;
+				continue;
+			}
+
+			lowprio_min_time_to_peer = tp->srtt;
+			lowpriosk = sk;
+			mss_lowprio = this_mss;
+		} else if (!tp->mptcp->rcv_low_prio &&
+		    tp->srtt < min_time_to_peer &&
 		    !(skb && mptcp_pi_to_flag(tp->mptcp->path_index) & TCP_SKB_CB(skb)->path_mask)) {
 			if (!mptcp_is_available(sk, skb, &this_mss))
 				continue;
@@ -187,7 +208,10 @@ static struct sock *get_available_subflow(struct sock *meta_sk,
 		}
 	}
 
-	if (bestsk) {
+	if (mpcb->cnt_established == cnt_backups && lowpriosk) {
+		mss = mss_lowprio;
+		sk = lowpriosk;
+	} else if (bestsk) {
 		sk = bestsk;
 	} else if (backupsk){
 		/* It has been sent on all subflows once - let's give it a

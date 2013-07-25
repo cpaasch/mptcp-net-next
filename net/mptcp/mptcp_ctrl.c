@@ -1453,6 +1453,11 @@ struct sock *mptcp_check_req_child(struct sock *meta_sk, struct sock *child,
 		goto teardown;
 	}
 
+	/* The child is a clone of the meta socket, we must now reset
+	 * some of the fields
+	 */
+	child_tp->mptcp->rcv_low_prio = mtreq->low_prio;
+
 	/* We should allow proper increase of the snd/rcv-buffers. Thus, we
 	 * use the original values instead of the bloated up ones from the
 	 * clone.
