@@ -63,6 +63,21 @@ struct mptcp_rem4 {
 	struct in_addr	addr;
 };
 
+struct mptcp_loc6 {
+	u8		id;
+	u8		low_prio:1;
+	__be16		port;
+	struct in6_addr	addr;
+};
+
+struct mptcp_rem6 {
+	u8		id;
+	u8		bitfield;
+	u8		retry_bitfield;
+	__be16		port;
+	struct in6_addr	addr;
+};
+
 struct mptcp_cb;
 #ifdef CONFIG_MPTCP
 
