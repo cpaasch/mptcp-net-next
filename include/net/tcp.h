@@ -373,6 +373,8 @@ extern struct proto tcp_prot;
 
 /**** START - Exports needed for MPTCP ****/
 extern const struct inet_connection_sock_af_ops ipv4_specific;
+extern const struct inet_connection_sock_af_ops ipv6_specific;
+extern const struct inet_connection_sock_af_ops ipv6_mapped;
 
 struct mptcp_options_received;
 
@@ -424,6 +426,24 @@ void tcp_v4_send_reset(struct sock *sk, struct sk_buff *skb);
 struct ip_options_rcu *tcp_v4_save_options(struct sk_buff *skb);
 struct sock *tcp_v4_hnd_req(struct sock *sk, struct sk_buff *skb);
 void tcp_v4_reqsk_destructor(struct request_sock *req);
+
+int tcp_v6_rtx_synack(struct sock *sk, struct request_sock *req);
+void tcp_v6_reqsk_send_ack(struct sock *sk, struct sk_buff *skb,
+			   struct request_sock *req);
+__u32 tcp_v6_init_sequence(const struct sk_buff *skb);
+int tcp_v6_send_synack(struct sock *sk, struct dst_entry *dst,
+		       struct flowi6 *fl6, struct request_sock *req,
+		       u16 queue_mapping);
+void tcp_v6_send_reset(struct sock *sk, struct sk_buff *skb);
+int tcp_v6_do_rcv(struct sock *sk, struct sk_buff *skb);
+int tcp_v6_connect(struct sock *sk, struct sockaddr *uaddr, int addr_len);
+void tcp_v6_destroy_sock(struct sock *sk);
+void tcp_v6_hash(struct sock *sk);
+struct sock *tcp_v6_hnd_req(struct sock *sk,struct sk_buff *skb);
+struct sock *tcp_v6_syn_recv_sock(struct sock *sk, struct sk_buff *skb,
+				  struct request_sock *req,
+				  struct dst_entry *dst);
+void tcp_v6_reqsk_destructor(struct request_sock *req);
 
 void sock_valbool_flag(struct sock *sk, int bit, int valbool);
 unsigned int tcp_xmit_size_goal(struct sock *sk, u32 mss_now,

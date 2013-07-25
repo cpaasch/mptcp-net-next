@@ -33,6 +33,7 @@
 
 #include <net/mptcp.h>
 #include <net/mptcp_v4.h>
+#include <net/mptcp_v6.h>
 #include <net/sock.h>
 
 static inline int mptcp_pi_to_flag(int pi)
@@ -1323,11 +1324,20 @@ static void mptcp_set_nonce(struct sock *sk)
 	struct tcp_sock *tp = tcp_sk(sk);
 	struct inet_sock *inet = inet_sk(sk);
 
-	tp->mptcp->mptcp_loc_nonce = mptcp_v4_get_nonce(inet->inet_saddr,
-							inet->inet_daddr,
-							inet->inet_sport,
-							inet->inet_dport,
-							tp->write_seq);
+	if (sk->sk_family == AF_INET)
+		tp->mptcp->mptcp_loc_nonce = mptcp_v4_get_nonce(inet->inet_saddr,
+								inet->inet_daddr,
+								inet->inet_sport,
+								inet->inet_dport,
+								tp->write_seq);
+#if IS_ENABLED(CONFIG_IPV6)
+	else
+		tp->mptcp->mptcp_loc_nonce = mptcp_v6_get_nonce(inet6_sk(sk)->saddr.s6_addr32,
+								sk->sk_v6_daddr.s6_addr32,
+				     	     	     	        inet->inet_sport,
+				     	     	     	        inet->inet_dport,
+				     	     	     	        tp->write_seq);
+#endif
 
 	tp->mptcp->nonce_set = 1;
 }
@@ -1392,11 +1402,23 @@ void mptcp_synack_options(struct request_sock *req,
 		opts->addr_id = 0;
 
 		/* Finding Address ID */
-		mptcp_for_each_bit_set(mtreq->mpcb->loc4_bits, i) {
-			struct mptcp_loc4 *addr = &mtreq->mpcb->locaddr4[i];
-			if (addr->addr.s_addr == ireq->loc_addr)
-				opts->addr_id = addr->id;
-		}
+		if (req->rsk_ops->family == AF_INET)
+			mptcp_for_each_bit_set(mtreq->mpcb->loc4_bits, i) {
+				struct mptcp_loc4 *addr =
+						&mtreq->mpcb->locaddr4[i];
+				if (addr->addr.s_addr == htons(ireq->ir_num))
+					opts->addr_id = addr->id;
+			}
+#if IS_ENABLED(CONFIG_IPV6)
+		else /* IPv6 */
+			mptcp_for_each_bit_set(mtreq->mpcb->loc6_bits, i) {
+				struct mptcp_loc6 *addr =
+						&mtreq->mpcb->locaddr6[i];
+				if (ipv6_addr_equal(&addr->addr,
+						    &inet_rsk(req)->ir_v6_loc_addr))
+					opts->addr_id = addr->id;
+			}
+#endif /* CONFIG_IPV6 */
 		*remaining -= MPTCP_SUB_LEN_JOIN_SYNACK_ALIGN;
 	}
 }
@@ -1500,6 +1522,15 @@ void mptcp_established_options(struct sock *sk, struct sk_buff *skb,
 		if (skb)
 			tp->mptcp->add_addr4 &= ~(1 << ind);
 		*size += MPTCP_SUB_LEN_ADD_ADDR4_ALIGN;
+	} else if (unlikely(tp->mptcp->add_addr6) &&
+		   MAX_TCP_OPTION_SPACE - *size >= MPTCP_SUB_LEN_ADD_ADDR6_ALIGN) {
+		int ind = mptcp_find_free_index(~(tp->mptcp->add_addr6));
+		opts->options |= OPTION_MPTCP;
+		opts->mptcp_options |= OPTION_ADD_ADDR;
+		opts->addr6 = &mpcb->locaddr6[ind];
+		if (skb)
+			tp->mptcp->add_addr6 &= ~(1 << ind);
+		*size += MPTCP_SUB_LEN_ADD_ADDR6_ALIGN;
 	} else if (unlikely(mpcb->remove_addrs) &&
 		   MAX_TCP_OPTION_SPACE - *size >=
 		   mptcp_sub_len_remove_addr_align(mpcb->remove_addrs)) {
@@ -1511,11 +1542,14 @@ void mptcp_established_options(struct sock *sk, struct sk_buff *skb,
 			mpcb->remove_addrs = 0;
 	} else if (!(opts->mptcp_options & OPTION_MP_CAPABLE) &&
 		   !(opts->mptcp_options & OPTION_MP_JOIN) &&
-		   ((unlikely(tp->mptcp->add_addr4) &&
+		   ((unlikely(tp->mptcp->add_addr6) &&
+		     MAX_TCP_OPTION_SPACE - *size <=
+		     MPTCP_SUB_LEN_ADD_ADDR6_ALIGN) ||
+		    (unlikely(tp->mptcp->add_addr4) &&
 		     MAX_TCP_OPTION_SPACE - *size >=
 		     MPTCP_SUB_LEN_ADD_ADDR4_ALIGN))) {
-		mptcp_debug("no space for add addr. unsent IPv4: %#x\n",
-			    tp->mptcp->add_addr4);
+		mptcp_debug("no space for add addr. unsent IPv4: %#x,IPv6: %#x\n",
+			    tp->mptcp->add_addr4, tp->mptcp->add_addr6);
 		tp->mptcp_add_addr_ack = 1;
 		tcp_send_ack(sk);
 		tp->mptcp_add_addr_ack = 0;
@@ -1602,6 +1636,16 @@ void mptcp_options_write(__be32 *ptr, struct tcp_sock *tp,
 			mpadd->addr_id = opts->addr4->id;
 			mpadd->u.v4.addr = opts->addr4->addr;
 			ptr += MPTCP_SUB_LEN_ADD_ADDR4_ALIGN >> 2;
+		} else if (opts->addr6) {
+			mpadd->len = MPTCP_SUB_LEN_ADD_ADDR6;
+			mpadd->sub = MPTCP_SUB_ADD_ADDR;
+			mpadd->ipver = 6;
+			mpadd->addr_id = opts->addr6->id;
+			memcpy(&mpadd->u.v6.addr, &opts->addr6->addr,
+			       sizeof(mpadd->u.v6.addr));
+			ptr += MPTCP_SUB_LEN_ADD_ADDR6_ALIGN >> 2;
+		} else {
+			BUG();
 		}
 	}
 	if (unlikely(OPTION_REMOVE_ADDR & opts->mptcp_options)) {
@@ -2043,6 +2087,15 @@ void mptcp_retransmit_timer(struct sock *meta_sk)
 				       meta_inet->inet_num, meta_tp->snd_una,
 				       meta_tp->snd_nxt);
 		}
+#if IS_ENABLED(CONFIG_IPV6)
+		else if (meta_sk->sk_family == AF_INET6) {
+			LIMIT_NETDEBUG(KERN_DEBUG "TCP: Peer %pI6:%u/%u unexpectedly shrunk window %u:%u (repaired)\n",
+				       &meta_sk->sk_v6_daddr,
+				       ntohs(meta_inet->inet_dport),
+				       meta_inet->inet_num, meta_tp->snd_una,
+				       meta_tp->snd_nxt);
+		}
+#endif
 		if (tcp_time_stamp - meta_tp->rcv_tstamp > TCP_RTO_MAX) {
 			tcp_write_err(meta_sk);
 			return;
