@@ -28,11 +28,16 @@
  */
 
 #include <net/inet_common.h>
+#include <net/inet6_hashtables.h>
+#include <net/ipv6.h>
+#include <net/ip6_checksum.h>
 #include <net/mptcp.h>
 #include <net/mptcp_v4.h>
+#include <net/mptcp_v6.h>
 #include <net/sock.h>
 #include <net/tcp.h>
 #include <net/tcp_states.h>
+#include <net/transp_v6.h>
 #include <net/xfrm.h>
 
 #include <linux/cryptohash.h>
@@ -107,6 +112,16 @@ static struct sock *mptcp_syn_recv_sock(struct sock *sk, struct sk_buff *skb,
 					struct request_sock *req,
 					struct dst_entry *dst)
 {
+#if IS_ENABLED(CONFIG_IPV6)
+	if (sk->sk_family == AF_INET6)
+		return tcp_v6_syn_recv_sock(sk, skb, req, dst);
+
+	/* sk->sk_family == AF_INET */
+	if (req->rsk_ops->family == AF_INET6)
+		return mptcp_v6v4_syn_recv_sock(sk, skb, req, dst);
+#endif
+
+	/* sk->sk_family == AF_INET && req->rsk_ops->family == AF_INET */
 	return tcp_v4_syn_recv_sock(sk, skb, req, dst);
 }
 
@@ -499,7 +514,12 @@ int mptcp_backlog_rcv(struct sock *meta_sk, struct sk_buff *skb)
 		return 0;
 	}
 
-	ret = tcp_v4_do_rcv(sk, skb);
+	if (sk->sk_family == AF_INET)
+		ret = tcp_v4_do_rcv(sk, skb);
+#if IS_ENABLED(CONFIG_IPV6)
+	else
+		ret = tcp_v6_do_rcv(sk, skb);
+#endif
 
 	sock_put(sk);
 	return ret;
@@ -519,15 +539,22 @@ static int mptcp_inherit_sk(const struct sock *sk, struct sock *newsk,
 	void *sptr = newsk->sk_security;
 #endif
 
-	memcpy(newsk, sk, offsetof(struct sock, sk_dontcopy_begin));
-	memcpy(&newsk->sk_dontcopy_end, &sk->sk_dontcopy_end,
-	       sizeof(struct tcp_sock) - offsetof(struct sock, sk_dontcopy_end));
+	if (sk->sk_family == AF_INET) {
+		memcpy(newsk, sk, offsetof(struct sock, sk_dontcopy_begin));
+		memcpy(&newsk->sk_dontcopy_end, &sk->sk_dontcopy_end,
+		       sizeof(struct tcp_sock) - offsetof(struct sock, sk_dontcopy_end));
+	} else {
+		memcpy(newsk, sk, offsetof(struct sock, sk_dontcopy_begin));
+		memcpy(&newsk->sk_dontcopy_end, &sk->sk_dontcopy_end,
+		       sizeof(struct tcp6_sock) - offsetof(struct sock, sk_dontcopy_end));
+	}
 
 #ifdef CONFIG_SECURITY_NETWORK
 	newsk->sk_security = sptr;
 	security_sk_clone(sk, newsk);
 #endif
 
+	/* Has been changed by sock_copy above - we may need an IPv6-socket */
 	newsk->sk_family = family;
 	newsk->sk_prot = prot;
 	newsk->sk_prot_creator = prot;
@@ -663,6 +690,37 @@ int mptcp_alloc_mpcb(struct sock *meta_sk, __u64 remote_key, u32 window)
 		kmem_cache_free(mptcp_cb_cache, mpcb);
 		return -ENOBUFS;
 	}
+
+#if IS_ENABLED(CONFIG_IPV6)
+	if (meta_icsk->icsk_af_ops == &ipv6_mapped) {
+		struct ipv6_pinfo *newnp, *np = inet6_sk(meta_sk);
+
+		inet_sk(master_sk)->pinet6 = &((struct tcp6_sock *)master_sk)->inet6;
+
+		newnp = inet6_sk(master_sk);
+		memcpy(newnp, np, sizeof(struct ipv6_pinfo));
+
+		newnp->ipv6_mc_list = NULL;
+		newnp->ipv6_ac_list = NULL;
+		newnp->ipv6_fl_list = NULL;
+		newnp->opt = NULL;
+		newnp->pktoptions = NULL;
+		(void)xchg(&newnp->rxpmtu, NULL);
+	} else if (meta_sk->sk_family == AF_INET6) {
+		struct ipv6_pinfo *newnp;
+
+		/* Meta is IPv4. Initialize pinet6 for the master-sk. */
+		inet_sk(master_sk)->pinet6 = &((struct tcp6_sock *)master_sk)->inet6;
+
+		newnp = inet6_sk(master_sk);
+
+		newnp->hop_limit	= -1;
+		newnp->mcast_hops	= IPV6_DEFAULT_MCASTHOPS;
+		newnp->mc_loop	= 1;
+		newnp->pmtudisc	= IPV6_PMTUDISC_WANT;
+		newnp->ipv6only	= sock_net(master_sk)->ipv6.sysctl.bindv6only;
+	}
+#endif
 
 	meta_tp->mptcp = kmem_cache_zalloc(mptcp_sock_cache, GFP_ATOMIC);
 	if (!meta_tp->mptcp) {
@@ -805,15 +863,34 @@ int mptcp_alloc_mpcb(struct sock *meta_sk, __u64 remote_key, u32 window)
 struct sock *mptcp_sk_clone(const struct sock *sk, int family,
 			    const gfp_t priority)
 {
-	struct sock *newsk = sk_prot_alloc(&tcp_prot, priority, family);
-	if (!newsk)
-		return NULL;
+	struct sock *newsk = NULL;
 
-	/* Set these pointers - they are needed by mptcp_inherit_sk */
-	newsk->sk_prot = &tcp_prot;
-	newsk->sk_prot_creator = &tcp_prot;
-	inet_csk(newsk)->icsk_af_ops = &ipv4_specific;
-	newsk->sk_family = AF_INET;
+	if (family == AF_INET && sk->sk_family == AF_INET) {
+		newsk = sk_prot_alloc(&tcp_prot, priority, family);
+		if (!newsk)
+			return NULL;
+
+		/* Set these pointers - they are needed by mptcp_inherit_sk */
+		newsk->sk_prot = &tcp_prot;
+		newsk->sk_prot_creator = &tcp_prot;
+		inet_csk(newsk)->icsk_af_ops = &ipv4_specific;
+		newsk->sk_family = AF_INET;
+	}
+#if IS_ENABLED(CONFIG_IPV6)
+	else {
+		newsk = sk_prot_alloc(&tcpv6_prot, priority, family);
+		if (!newsk)
+			return NULL;
+
+		newsk->sk_prot = &tcpv6_prot;
+		newsk->sk_prot_creator = &tcpv6_prot;
+		if (family == AF_INET)
+			inet_csk(newsk)->icsk_af_ops = &ipv6_mapped;
+		else
+			inet_csk(newsk)->icsk_af_ops = &ipv6_specific;
+		newsk->sk_family = AF_INET6;
+	}
+#endif
 
 	if (mptcp_inherit_sk(sk, newsk, family, priority))
 		return NULL;
@@ -955,21 +1032,51 @@ void mptcp_update_metasocket(struct sock *sk, struct sock *meta_sk)
 {
 	struct mptcp_cb *mpcb = tcp_sk(meta_sk)->mpcb;
 
-	mpcb->locaddr4[0].addr.s_addr = inet_sk(sk)->inet_saddr;
-	mpcb->locaddr4[0].id = 0;
-	mpcb->locaddr4[0].port = 0;
-	mpcb->locaddr4[0].low_prio = 0;
-	mpcb->loc4_bits |= 1;
-	mpcb->next_v4_index = 1;
+	switch (sk->sk_family) {
+#if IS_ENABLED(CONFIG_IPV6)
+	case AF_INET6:
+		/* If the socket is v4 mapped, we continue with v4 operations */
+		if (!mptcp_v6_is_v4_mapped(sk)) {
+			mpcb->locaddr6[0].addr = inet6_sk(sk)->saddr;
+			mpcb->locaddr6[0].id = 0;
+			mpcb->locaddr6[0].port = 0;
+			mpcb->locaddr6[0].low_prio = 0;
+			mpcb->loc6_bits |= 1;
+			mpcb->next_v6_index = 1;
 
-	mptcp_v4_add_raddress(mpcb,
-			      (struct in_addr *)&inet_sk(sk)->inet_daddr,
-			      0, 0);
-	mptcp_v4_set_init_addr_bit(mpcb, inet_sk(sk)->inet_daddr);
+			mptcp_v6_add_raddress(mpcb, &sk->sk_v6_daddr, 0, 0);
+			mptcp_v6_set_init_addr_bit(mpcb, &sk->sk_v6_daddr);
+			break;
+		}
+#endif
+	case AF_INET:
+		mpcb->locaddr4[0].addr.s_addr = inet_sk(sk)->inet_saddr;
+		mpcb->locaddr4[0].id = 0;
+		mpcb->locaddr4[0].port = 0;
+		mpcb->locaddr4[0].low_prio = 0;
+		mpcb->loc4_bits |= 1;
+		mpcb->next_v4_index = 1;
+
+		mptcp_v4_add_raddress(mpcb,
+				      (struct in_addr *)&inet_sk(sk)->inet_daddr,
+				      0, 0);
+		mptcp_v4_set_init_addr_bit(mpcb, inet_sk(sk)->inet_daddr);
+		break;
+	}
 
 	mptcp_set_addresses(meta_sk);
 
-	tcp_sk(sk)->mptcp->low_prio = mpcb->locaddr4[0].low_prio;
+	switch (sk->sk_family) {
+	case AF_INET:
+		tcp_sk(sk)->mptcp->low_prio = mpcb->locaddr4[0].low_prio;
+		break;
+#if IS_ENABLED(CONFIG_IPV6)
+	case AF_INET6:
+		tcp_sk(sk)->mptcp->low_prio = mpcb->locaddr6[0].low_prio;
+		break;
+#endif
+	}
+
 	tcp_sk(sk)->mptcp->send_mp_prio = tcp_sk(sk)->mptcp->low_prio;
 }
 
@@ -1370,12 +1477,14 @@ int mptcp_doit(struct sock *sk)
 	if (tcp_sk(sk)->mpc || tcp_sk(sk)->request_mptcp)
 		return 1;
 
-	if (sk->sk_family == AF_INET6 && !mptcp_v6_is_v4_mapped(sk))
-		return 0;
-
 	/* Don't do mptcp over loopback */
-	if ((ipv4_is_loopback(inet_sk(sk)->inet_daddr) ||
+	if (sk->sk_family == AF_INET &&
+	    (ipv4_is_loopback(inet_sk(sk)->inet_daddr) ||
 	     ipv4_is_loopback(inet_sk(sk)->inet_saddr)))
+		return 0;
+	if (sk->sk_family == AF_INET6 &&
+	    (ipv6_addr_loopback(&sk->sk_v6_daddr) ||
+	     ipv6_addr_loopback(&inet6_sk(sk)->saddr)))
 		return 0;
 	if (mptcp_v6_is_v4_mapped(sk) &&
 	    ipv4_is_loopback(inet_sk(sk)->inet_saddr))
@@ -1402,7 +1511,13 @@ int mptcp_create_master_sk(struct sock *meta_sk, __u64 remote_key, u32 window)
 		goto err_add_sock;
 
 	meta_sk->sk_prot->unhash(meta_sk);
-	__inet_hash_nolisten(master_sk, NULL);
+
+	if (master_sk->sk_family == AF_INET || mptcp_v6_is_v4_mapped(master_sk))
+		__inet_hash_nolisten(master_sk, NULL);
+#if IS_ENABLED(CONFIG_IPV6)
+	else
+		__inet6_hash(master_sk, NULL);
+#endif
 
 	master_tp->mptcp->init_rcv_wnd = master_tp->rcv_wnd;
 

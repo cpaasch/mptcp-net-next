@@ -76,6 +76,7 @@
 #include <net/netdma.h>
 #include <net/mptcp.h>
 #include <net/mptcp_v4.h>
+#include <net/mptcp_v6.h>
 
 int sysctl_tcp_timestamps __read_mostly = 1;
 int sysctl_tcp_window_scaling __read_mostly = 1;
