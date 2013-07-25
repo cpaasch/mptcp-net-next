@@ -556,9 +556,16 @@ static inline int mptcp_sub_len_dss(struct mp_dss *m, int csum)
 extern int sysctl_mptcp_ndiffports;
 extern int sysctl_mptcp_enabled;
 extern int sysctl_mptcp_checksum;
+extern int sysctl_mptcp_debug;
 extern int sysctl_mptcp_syn_retries;
 
 extern struct workqueue_struct *mptcp_wq;
+
+#define mptcp_debug(fmt, args...)					\
+	do {								\
+		if (unlikely(sysctl_mptcp_debug))			\
+			pr_err(__FILE__ ": " fmt, ##args);	\
+	} while (0)
 
 /* Iterates over all subflows */
 #define mptcp_for_each_tp(mpcb, tp)					\
@@ -1131,6 +1138,10 @@ static inline int mptcp_v6_is_v4_mapped(struct sock *sk)
 	       ipv6_addr_type(&inet6_sk(sk)->saddr) == IPV6_ADDR_MAPPED;
 }
 #else /* CONFIG_MPTCP */
+#define mptcp_debug(fmt, args...)	\
+	do {				\
+	} while (0)
+
 /* Without MPTCP, we just do one iteration
  * over the only socket available. This assumes that
  * the sk/tp arg is the socket in that case.
