@@ -90,6 +90,72 @@ struct request_sock_ops mptcp_request_sock_ops __read_mostly = {
 	.syn_ack_timeout =	tcp_syn_ack_timeout,
 };
 
+/* Based on function tcp_v4_conn_request (tcp_ipv4.c)
+ * Returns -1 if there is no space anymore to store an additional
+ * address
+ */
+int mptcp_v4_add_raddress(struct mptcp_cb *mpcb, const struct in_addr *addr,
+			  __be16 port, u8 id)
+{
+	int i;
+	struct mptcp_rem4 *rem4;
+
+	mptcp_for_each_bit_set(mpcb->rem4_bits, i) {
+		rem4 = &mpcb->remaddr4[i];
+
+		/* Address is already in the list --- continue */
+		if (rem4->id == id &&
+		    rem4->addr.s_addr == addr->s_addr && rem4->port == port)
+			return 0;
+
+		/* This may be the case, when the peer is behind a NAT. He is
+		 * trying to JOIN, thus sending the JOIN with a certain ID.
+		 * However the src_addr of the IP-packet has been changed. We
+		 * update the addr in the list, because this is the address as
+		 * OUR BOX sees it.
+		 */
+		if (rem4->id == id && rem4->addr.s_addr != addr->s_addr) {
+			/* update the address */
+			rem4->addr.s_addr = addr->s_addr;
+			rem4->port = port;
+			return 0;
+		}
+	}
+
+	i = mptcp_find_free_index(mpcb->rem4_bits);
+	/* Do we have already the maximum number of local/remote addresses? */
+	if (i < 0)
+		return -1;
+
+	rem4 = &mpcb->remaddr4[i];
+
+	/* Address is not known yet, store it */
+	rem4->addr.s_addr = addr->s_addr;
+	rem4->port = port;
+	rem4->bitfield = 0;
+	rem4->retry_bitfield = 0;
+	rem4->id = id;
+	mpcb->rem4_bits |= (1 << i);
+
+	return 0;
+}
+
+/* Sets the bitfield of the remote-address field
+ * local address is not set as it will disappear with the global address-list
+ */
+void mptcp_v4_set_init_addr_bit(struct mptcp_cb *mpcb, __be32 daddr)
+{
+	int i;
+
+	mptcp_for_each_bit_set(mpcb->rem4_bits, i) {
+		if (mpcb->remaddr4[i].addr.s_addr == daddr) {
+			/* It's the initial flow - thus local index == 0 */
+			mpcb->remaddr4[i].bitfield |= 1;
+			return;
+		}
+	}
+}
+
 /* We only process join requests here. (either the SYN or the final ACK) */
 int mptcp_v4_do_rcv(struct sock *meta_sk, struct sk_buff *skb)
 {

@@ -66,6 +66,11 @@ struct mptcp_options_received {
 		dss_csum:1,
 		drop_me:1,
 
+		saw_add_addr:2, /* Saw at least one add_addr option:
+				 * 0x1: IPv4 - 0x2: IPv6
+				 */
+		more_add_addr:1, /* Saw one more add-addr. */
+
 		mp_fail:1,
 		mp_fclose:1;
 	u8	prio_addr_id;	/* Address-id in the MP_PRIO */
@@ -208,6 +213,10 @@ struct mptcp_cb {
 	/* Local addresses */
 	struct mptcp_loc4 locaddr4;
 
+	/* Remove addresses */
+	struct mptcp_rem4 remaddr4[MPTCP_MAX_ADDR];
+	u8 rem4_bits;
+
 	/* Original snd/rcvbuf of the initial subflow.
 	 * Used for the new subflows on the server-side to allow correct
 	 * autotuning
@@ -264,6 +273,12 @@ struct mptcp_cb {
 #define MPTCP_SUB_LEN_DSM_ALIGN  (MPTCP_SUB_LEN_DSS_ALIGN +		\
 				  MPTCP_SUB_LEN_SEQ_ALIGN +		\
 				  MPTCP_SUB_LEN_ACK_ALIGN)
+
+#define MPTCP_SUB_ADD_ADDR		3
+#define MPTCP_SUB_LEN_ADD_ADDR4		8
+#define MPTCP_SUB_LEN_ADD_ADDR6		20
+#define MPTCP_SUB_LEN_ADD_ADDR4_ALIGN	8
+#define MPTCP_SUB_LEN_ADD_ADDR6_ALIGN	20
 
 #define MPTCP_SUB_FAIL		6
 #define MPTCP_SUB_LEN_FAIL	12
@@ -381,6 +396,31 @@ struct mp_dss {
 #error	"Adjust your <asm/byteorder.h> defines"
 #endif
 };
+
+struct mp_add_addr {
+	__u8	kind;
+	__u8	len;
+#if defined(__LITTLE_ENDIAN_BITFIELD)
+	__u8	ipver:4,
+		sub:4;
+#elif defined(__BIG_ENDIAN_BITFIELD)
+	__u8	sub:4,
+		ipver:4;
+#else
+#error	"Adjust your <asm/byteorder.h> defines"
+#endif
+	__u8	addr_id;
+	union {
+		struct {
+			struct in_addr	addr;
+			__be16		port;
+		} v4;
+		struct {
+			struct in6_addr	addr;
+			__be16		port;
+		} v6;
+	} u;
+} __attribute__((__packed__));
 
 struct mp_fail {
 	__u8	kind;
@@ -707,6 +747,9 @@ static inline void mptcp_init_mp_opt(struct mptcp_options_received *mopt)
 	mopt->dss_csum = 0;
 	mopt->drop_me = 0;
 
+	mopt->saw_add_addr = 0;
+	mopt->more_add_addr = 0;
+
 	mopt->mp_fail = 0;
 	mopt->mp_fclose = 0;
 }
@@ -715,6 +758,8 @@ static inline void mptcp_reset_mopt(struct tcp_sock *tp)
 {
 	struct mptcp_options_received *mopt = &tp->mptcp->rx_opt;
 
+	mopt->saw_add_addr = 0;
+	mopt->more_add_addr = 0;
 	mopt->mp_fail = 0;
 	mopt->mp_fclose = 0;
 }
