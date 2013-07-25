@@ -892,6 +892,11 @@ void mptcp_update_metasocket(struct sock *sk, struct sock *meta_sk)
 	mpcb->locaddr4.addr.s_addr = inet_sk(sk)->inet_saddr;
 	mpcb->locaddr4.id = 0;
 	mpcb->locaddr4.port = 0;
+
+	mptcp_v4_add_raddress(mpcb,
+			      (struct in_addr *)&inet_sk(sk)->inet_daddr,
+			      0, 0);
+	mptcp_v4_set_init_addr_bit(mpcb, inet_sk(sk)->inet_daddr);
 }
 
 /* Clean up the receive buffer for full frames taken by the user,

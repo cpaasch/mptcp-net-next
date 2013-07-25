@@ -1362,6 +1362,21 @@ void mptcp_parse_options(const uint8_t *ptr, int opsize,
 
 		break;
 	}
+	case MPTCP_SUB_ADD_ADDR:
+	{
+		if (opsize != MPTCP_SUB_LEN_ADD_ADDR4 &&
+		    opsize != MPTCP_SUB_LEN_ADD_ADDR4 + 2)
+			break;
+
+		/* We have to manually parse the options if we got two of them. */
+		if (mopt->saw_add_addr) {
+			mopt->more_add_addr = 1;
+			break;
+		}
+		mopt->saw_add_addr = 1;
+		mopt->add_addr_ptr = ptr;
+		break;
+	}
 	case MPTCP_SUB_FAIL:
 		if (opsize != MPTCP_SUB_LEN_FAIL)
 			break;
@@ -1401,6 +1416,60 @@ int mptcp_check_rtt(const struct tcp_sock *tp, int time)
 		return 1;
 
 	return 0;
+}
+
+static void mptcp_handle_add_addr(const unsigned char *ptr, struct sock *sk)
+{
+	struct mp_add_addr *mpadd = (struct mp_add_addr *)ptr;
+
+	if (mpadd->ipver == 4) {
+		__be16 port = 0;
+		if (mpadd->len == MPTCP_SUB_LEN_ADD_ADDR4 + 2)
+			port  = mpadd->u.v4.port;
+
+		mptcp_v4_add_raddress(tcp_sk(sk)->mpcb, &mpadd->u.v4.addr, port,
+				      mpadd->addr_id);
+	}
+}
+
+static void mptcp_parse_addropt(const struct sk_buff *skb, struct sock *sk)
+{
+	struct tcphdr *th = tcp_hdr(skb);
+	unsigned char *ptr;
+	int length = (th->doff * 4) - sizeof(struct tcphdr);
+
+	/* Jump through the options to check whether ADD_ADDR is there */
+	ptr = (unsigned char *)(th + 1);
+	while (length > 0) {
+		int opcode = *ptr++;
+		int opsize;
+
+		switch (opcode) {
+		case TCPOPT_EOL:
+			return;
+		case TCPOPT_NOP:
+			length--;
+			continue;
+		default:
+			opsize = *ptr++;
+			if (opsize < 2)
+				return;
+			if (opsize > length)
+				return;  /* don't parse partial options */
+			if (opcode == TCPOPT_MPTCP &&
+			    ((struct mptcp_option *)ptr)->sub == MPTCP_SUB_ADD_ADDR) {
+				if (opsize != MPTCP_SUB_LEN_ADD_ADDR4 &&
+				    opsize != MPTCP_SUB_LEN_ADD_ADDR4 + 2)
+					goto cont;
+
+				mptcp_handle_add_addr(ptr, sk);
+			}
+cont:
+			ptr += opsize - 2;
+			length -= opsize;
+		}
+	}
+	return;
 }
 
 static inline int mptcp_mp_fail_rcvd(struct sock *sk, const struct tcphdr *th)
@@ -1460,6 +1529,7 @@ static inline int mptcp_mp_fail_rcvd(struct sock *sk, const struct tcphdr *th)
 int mptcp_handle_options(struct sock *sk, const struct tcphdr *th, struct sk_buff *skb)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
+	struct mptcp_options_received *mopt = &tp->mptcp->rx_opt;
 
 	if (tp->mpcb->infinite_mapping_rcv || tp->mpcb->infinite_mapping_snd)
 		return 0;
@@ -1478,6 +1548,18 @@ int mptcp_handle_options(struct sock *sk, const struct tcphdr *th, struct sk_buf
 
 		mptcp_sub_force_close(sk);
 		return 1;
+	}
+
+	if (mopt->saw_add_addr) {
+		if (mopt->more_add_addr) {
+			mptcp_parse_addropt(skb, sk);
+		} else {
+			if (mopt->saw_add_addr)
+				mptcp_handle_add_addr(mopt->add_addr_ptr, sk);
+		}
+
+		mopt->more_add_addr = 0;
+		mopt->saw_add_addr = 0;
 	}
 
 	mptcp_data_ack(sk, skb);
