@@ -237,6 +237,9 @@ u8 mptcp_get_loc_addrid(struct mptcp_cb *mpcb, struct sock *sk)
 			return mpcb->locaddr4[i].id;
 	}
 
+	mptcp_debug("%s %pI4 not locally found\n", __func__,
+		    &inet_sk(sk)->inet_saddr);
+
 	BUG();
 	return 0;
 }
@@ -285,9 +288,12 @@ void mptcp_set_addresses(struct sock *meta_sk)
 
 				i = __mptcp_find_free_index(mpcb->loc4_bits, -1,
 							    mpcb->next_v4_index);
-				if (i < 0)
+				if (i < 0) {
+					mptcp_debug("%s: At max num of local addresses: %d --- not adding address: %pI4\n",
+						    __func__, MPTCP_MAX_ADDR,
+						    &ifa_address);
 					goto out;
-
+				}
 				mpcb->locaddr4[i].addr.s_addr = ifa_address;
 				mpcb->locaddr4[i].port = 0;
 				mpcb->locaddr4[i].id = i;
@@ -384,8 +390,10 @@ int mptcp_lookup_join(struct sk_buff *skb, struct inet_timewait_sock *tw)
 
 	token = join_opt->u.syn.token;
 	meta_sk = mptcp_hash_find(dev_net(skb_dst(skb)->dev), token);
-	if (!meta_sk)
+	if (!meta_sk) {
+		mptcp_debug("%s:mpcb not found:%x\n", __func__, token);
 		return -1;
+	}
 
 	mpcb = tcp_sk(meta_sk)->mpcb;
 	if (mpcb->infinite_mapping_rcv) {
@@ -437,8 +445,10 @@ int mptcp_do_join_short(struct sk_buff *skb, struct mptcp_options_received *mopt
 
 	token = mopt->mptcp_rem_token;
 	meta_sk = mptcp_hash_find(net, token);
-	if (!meta_sk)
+	if (!meta_sk) {
+		mptcp_debug("%s:mpcb not found:%x\n", __func__, token);
 		return -1;
+	}
 
 	TCP_SKB_CB(skb)->mptcp_flags = MPTCPHDR_JOIN;
 
