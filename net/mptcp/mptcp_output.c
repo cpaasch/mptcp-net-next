@@ -1514,6 +1514,8 @@ void mptcp_established_options(struct sock *sk, struct sk_buff *skb,
 		   ((unlikely(tp->mptcp->add_addr4) &&
 		     MAX_TCP_OPTION_SPACE - *size >=
 		     MPTCP_SUB_LEN_ADD_ADDR4_ALIGN))) {
+		mptcp_debug("no space for add addr. unsent IPv4: %#x\n",
+			    tp->mptcp->add_addr4);
 		tp->mptcp_add_addr_ack = 1;
 		tcp_send_ack(sk);
 		tp->mptcp_add_addr_ack = 0;
