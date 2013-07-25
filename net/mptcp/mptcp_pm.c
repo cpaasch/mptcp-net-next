@@ -40,6 +40,14 @@
 #include <net/mptcp.h>
 #include <net/mptcp_v4.h>
 #include <net/mptcp_pm.h>
+#if IS_ENABLED(CONFIG_IPV6)
+#include <net/if_inet6.h>
+#include <net/ipv6.h>
+#include <net/ip6_checksum.h>
+#include <net/inet6_connection_sock.h>
+#include <net/mptcp_v6.h>
+#include <net/addrconf.h>
+#endif
 
 static inline u32 mptcp_hash_tk(u32 token)
 {
@@ -117,10 +125,19 @@ static void mptcp_set_key_reqsk(struct request_sock *req,
 	struct inet_request_sock *ireq = inet_rsk(req);
 	struct mptcp_request_sock *mtreq = mptcp_rsk(req);
 
-	mtreq->mptcp_loc_key = mptcp_v4_get_key(ip_hdr(skb)->saddr,
-					        ip_hdr(skb)->daddr,
-					        ireq->loc_port,
-					        ireq->rmt_port);
+	if (skb->protocol == htons(ETH_P_IP)) {
+		mtreq->mptcp_loc_key = mptcp_v4_get_key(ip_hdr(skb)->saddr,
+						        ip_hdr(skb)->daddr,
+						        htons(ireq->ir_num),
+						        ireq->ir_rmt_port);
+#if IS_ENABLED(CONFIG_IPV6)
+	} else {
+		mtreq->mptcp_loc_key = mptcp_v6_get_key(ipv6_hdr(skb)->saddr.s6_addr32,
+							ipv6_hdr(skb)->daddr.s6_addr32,
+							htons(ireq->ir_num),
+							ireq->ir_rmt_port);
+#endif
+	}
 
 	mptcp_key_sha1(mtreq->mptcp_loc_key, &mtreq->mptcp_loc_token, NULL);
 }
@@ -155,10 +172,18 @@ static void mptcp_set_key_sk(struct sock *sk)
 	struct tcp_sock *tp = tcp_sk(sk);
 	struct inet_sock *isk = inet_sk(sk);
 
-	tp->mptcp_loc_key = mptcp_v4_get_key(isk->inet_saddr,
-					     isk->inet_daddr,
-					     isk->inet_sport,
-					     isk->inet_dport);
+	if (sk->sk_family == AF_INET)
+		tp->mptcp_loc_key = mptcp_v4_get_key(isk->inet_saddr,
+						     isk->inet_daddr,
+						     isk->inet_sport,
+						     isk->inet_dport);
+#if IS_ENABLED(CONFIG_IPV6)
+	else
+		tp->mptcp_loc_key = mptcp_v6_get_key(inet6_sk(sk)->saddr.s6_addr32,
+						     sk->sk_v6_daddr.s6_addr32,
+						     isk->inet_sport,
+						     isk->inet_dport);
+#endif
 
 	mptcp_key_sha1(tp->mptcp_loc_key,
 		       &tp->mptcp_loc_token, NULL);
@@ -231,14 +256,30 @@ u8 mptcp_get_loc_addrid(struct mptcp_cb *mpcb, struct sock *sk)
 {
 	int i;
 
-	mptcp_for_each_bit_set(mpcb->loc4_bits, i) {
-		if (mpcb->locaddr4[i].addr.s_addr ==
-				inet_sk(sk)->inet_saddr)
-			return mpcb->locaddr4[i].id;
-	}
+	if (sk->sk_family == AF_INET) {
+		mptcp_for_each_bit_set(mpcb->loc4_bits, i) {
+			if (mpcb->locaddr4[i].addr.s_addr ==
+					inet_sk(sk)->inet_saddr)
+				return mpcb->locaddr4[i].id;
+		}
 
-	mptcp_debug("%s %pI4 not locally found\n", __func__,
-		    &inet_sk(sk)->inet_saddr);
+		mptcp_debug("%s %pI4 not locally found\n", __func__,
+			    &inet_sk(sk)->inet_saddr);
+		BUG();
+	}
+#if IS_ENABLED(CONFIG_IPV6)
+	if (sk->sk_family == AF_INET6) {
+		mptcp_for_each_bit_set(mpcb->loc6_bits, i) {
+			if (ipv6_addr_equal(&mpcb->locaddr6[i].addr,
+					    &inet6_sk(sk)->saddr))
+				return mpcb->locaddr6[i].id;
+		}
+
+		mptcp_debug("%s %pI6 not locally found\n", __func__,
+			    &inet6_sk(sk)->saddr);
+		BUG();
+	}
+#endif /* CONFIG_IPV6 */
 
 	BUG();
 	return 0;
@@ -264,12 +305,16 @@ void mptcp_set_addresses(struct sock *meta_sk)
 			struct in_device *in_dev = __in_dev_get_rcu(dev);
 			struct in_ifaddr *ifa;
 			__be32 ifa_address;
+#if IS_ENABLED(CONFIG_IPV6)
+			struct inet6_dev *in6_dev = __in6_dev_get(dev);
+			struct inet6_ifaddr *ifa6;
+#endif
 
 			if (dev->flags & (IFF_LOOPBACK | IFF_NOMULTIPATH))
 				continue;
 
 			if (!in_dev)
-				goto out;
+				goto cont_ipv6;
 
 			for (ifa = in_dev->ifa_list; ifa; ifa = ifa->ifa_next) {
 				int i;
@@ -303,6 +348,49 @@ void mptcp_set_addresses(struct sock *meta_sk)
 				mpcb->next_v4_index = i + 1;
 				mptcp_v4_send_add_addr(i, mpcb);
 			}
+
+cont_ipv6:
+; /* This ; is necessary to fix build-errors when IPv6 is disabled */
+#if IS_ENABLED(CONFIG_IPV6)
+			if (!in6_dev)
+				continue;
+
+			list_for_each_entry(ifa6, &in6_dev->addr_list, if_list) {
+				int addr_type = ipv6_addr_type(&ifa6->addr);
+				int i;
+
+				if (addr_type == IPV6_ADDR_ANY ||
+				    addr_type & IPV6_ADDR_LOOPBACK ||
+				    addr_type & IPV6_ADDR_LINKLOCAL)
+					continue;
+
+				if (meta_sk->sk_family == AF_INET6 &&
+				    ipv6_addr_equal(&inet6_sk(meta_sk)->saddr,
+						    &(ifa6->addr))) {
+					mpcb->locaddr6[0].low_prio = dev->flags &
+								IFF_MPBACKUP ? 1 : 0;
+					continue;
+				}
+
+				i = __mptcp_find_free_index(mpcb->loc6_bits, -1,
+							    mpcb->next_v6_index);
+				if (i < 0) {
+					mptcp_debug("%s: At max num of local addresses: %d --- not adding address: %pI6\n",
+						    __func__, MPTCP_MAX_ADDR,
+						    &ifa6->addr);
+					goto out;
+				}
+
+				mpcb->locaddr6[i].addr = ifa6->addr;
+				mpcb->locaddr6[i].port = 0;
+				mpcb->locaddr6[i].id = i + MPTCP_MAX_ADDR;
+				mpcb->locaddr6[i].low_prio = (dev->flags & IFF_MPBACKUP) ?
+								1 : 0;
+				mpcb->loc6_bits |= (1 << i);
+				mpcb->next_v6_index = i + 1;
+				mptcp_v6_send_add_addr(i, mpcb);
+			}
+#endif
 		}
 	}
 
@@ -319,6 +407,11 @@ int mptcp_check_req(struct sk_buff *skb, struct net *net)
 	if (skb->protocol == htons(ETH_P_IP))
 		meta_sk = mptcp_v4_search_req(th->source, ip_hdr(skb)->saddr,
 					      ip_hdr(skb)->daddr, net);
+#if IS_ENABLED(CONFIG_IPV6)
+	else /* IPv6 */
+		meta_sk = mptcp_v6_search_req(th->source, &ipv6_hdr(skb)->saddr,
+					      &ipv6_hdr(skb)->daddr, net);
+#endif /* CONFIG_IPV6 */
 
 	if (!meta_sk)
 		return 0;
@@ -338,6 +431,10 @@ int mptcp_check_req(struct sk_buff *skb, struct net *net)
 		}
 	} else if (skb->protocol == htons(ETH_P_IP)) {
 		tcp_v4_do_rcv(meta_sk, skb);
+#if IS_ENABLED(CONFIG_IPV6)
+	} else { /* IPv6 */
+		tcp_v6_do_rcv(meta_sk, skb);
+#endif /* CONFIG_IPV6 */
 	}
 	bh_unlock_sock(meta_sk);
 	sock_put(meta_sk); /* Taken by mptcp_vX_search_req */
@@ -431,6 +528,10 @@ int mptcp_lookup_join(struct sk_buff *skb, struct inet_timewait_sock *tw)
 		}
 	} else if (skb->protocol == htons(ETH_P_IP)) {
 		tcp_v4_do_rcv(meta_sk, skb);
+#if IS_ENABLED(CONFIG_IPV6)
+	} else {
+		tcp_v6_do_rcv(meta_sk, skb);
+#endif /* CONFIG_IPV6 */
 	}
 	bh_unlock_sock(meta_sk);
 	sock_put(meta_sk); /* Taken by mptcp_hash_find */
@@ -489,6 +590,10 @@ int mptcp_do_join_short(struct sk_buff *skb, struct mptcp_options_received *mopt
 		skb_get(skb);
 		if (skb->protocol == htons(ETH_P_IP)) {
 			tcp_v4_do_rcv(meta_sk, skb);
+#if IS_ENABLED(CONFIG_IPV6)
+		} else { /* IPv6 */
+			tcp_v6_do_rcv(meta_sk, skb);
+#endif /* CONFIG_IPV6 */
 		}
 	}
 
@@ -532,6 +637,20 @@ next_subflow:
 		}
 	}
 
+#if IS_ENABLED(CONFIG_IPV6)
+	mptcp_for_each_bit_set(mpcb->rem6_bits, i) {
+		struct mptcp_rem6 *rem = &mpcb->remaddr6[i];
+
+		/* Do we need to retry establishing a subflow ? */
+		if (rem->retry_bitfield) {
+			int i = mptcp_find_free_index(~rem->retry_bitfield);
+			mptcp_init6_subsockets(meta_sk, &mpcb->locaddr6[i], rem);
+			rem->retry_bitfield &= ~(1 << mpcb->locaddr6[i].id);
+			goto next_subflow;
+		}
+	}
+#endif
+
 exit:
 	release_sock(meta_sk);
 	mutex_unlock(&mpcb->mutex);
@@ -573,6 +692,11 @@ next_subflow:
 		    mptcp_v6_is_v4_mapped(meta_sk)) {
 			mptcp_init4_subsockets(meta_sk, &mpcb->locaddr4[0],
 					       &mpcb->remaddr4[0]);
+		} else {
+#if IS_ENABLED(CONFIG_IPV6)
+			mptcp_init6_subsockets(meta_sk, &mpcb->locaddr6[0],
+					       &mpcb->remaddr6[0]);
+#endif
 		}
 		goto next_subflow;
 	}
@@ -598,6 +722,27 @@ next_subflow:
 			goto next_subflow;
 		}
 	}
+
+#if IS_ENABLED(CONFIG_IPV6)
+	mptcp_for_each_bit_set(mpcb->rem6_bits, i) {
+		struct mptcp_rem6 *rem;
+		u8 remaining_bits;
+
+		rem = &mpcb->remaddr6[i];
+		remaining_bits = ~(rem->bitfield) & mpcb->loc6_bits;
+
+		/* Are there still combinations to handle? */
+		if (remaining_bits) {
+			int i = mptcp_find_free_index(~remaining_bits);
+			/* If a route is not yet available then retry once */
+			if (mptcp_init6_subsockets(meta_sk, &mpcb->locaddr6[i],
+						   rem) == -ENETUNREACH)
+				retry = rem->retry_bitfield |=
+					(1 << mpcb->locaddr6[i].id);
+			goto next_subflow;
+		}
+	}
+#endif
 
 	if (retry && !delayed_work_pending(&mpcb->subflow_retry_work)) {
 		sock_hold(meta_sk);
@@ -654,12 +799,16 @@ void mptcp_address_worker(struct work_struct *work)
 	for_each_netdev(netns, dev) {
 		struct in_device *in_dev = __in_dev_get_rcu(dev);
 		struct in_ifaddr *ifa;
+#if IS_ENABLED(CONFIG_IPV6)
+		struct inet6_dev *in6_dev = __in6_dev_get(dev);
+		struct inet6_ifaddr *ifa6;
+#endif
 
 		if (dev->flags & (IFF_LOOPBACK | IFF_NOMULTIPATH))
 			continue;
 
 		if (!in_dev)
-			goto second;
+			goto cont_ipv6;
 
 		for (ifa = in_dev->ifa_list; ifa; ifa = ifa->ifa_next) {
 			unsigned long event;
@@ -676,9 +825,32 @@ void mptcp_address_worker(struct work_struct *work)
 
 			mptcp_pm_addr4_event_handler(ifa, event, mpcb);
 		}
+cont_ipv6:
+; /* This ; is necessary to fix build-errors when IPv6 is disabled */
+#if IS_ENABLED(CONFIG_IPV6)
+		if (!in6_dev)
+			continue;
+
+		read_lock(&in6_dev->lock);
+		list_for_each_entry(ifa6, &in6_dev->addr_list, if_list) {
+			unsigned long event;
+
+			if (!netif_running(in_dev->dev)) {
+				event = NETDEV_DOWN;
+			} else {
+				/* If it's up, it may have been changed or came up.
+				 * We set NETDEV_CHANGE, to take the good
+				 * code-path in mptcp_pm_addr4_event_handler
+				 */
+				event = NETDEV_CHANGE;
+			}
+
+			mptcp_pm_addr6_event_handler(ifa6, event, mpcb);
+		}
+		read_unlock(&in6_dev->lock);
+#endif
 	}
 
-second:
 	/* Second, we iterate over our local addresses and check if they
 	 * still exist in the interface-list.
 	 */
@@ -731,6 +903,61 @@ next_loc_addr:
 		continue; /* necessary here due to the previous label */
 	}
 
+#if IS_ENABLED(CONFIG_IPV6)
+	/* MPCB-Local IPv6 Addresses */
+	mptcp_for_each_bit_set(mpcb->loc6_bits, i) {
+		int j;
+
+		for_each_netdev(netns, dev) {
+			struct inet6_dev *in6_dev = __in6_dev_get(dev);
+			struct inet6_ifaddr *ifa6;
+
+			if (dev->flags & (IFF_LOOPBACK | IFF_NOMULTIPATH) ||
+			    !in6_dev)
+				continue;
+
+			read_lock(&in6_dev->lock);
+			list_for_each_entry(ifa6, &in6_dev->addr_list, if_list) {
+				if (ipv6_addr_equal(&mpcb->locaddr6[i].addr, &ifa6->addr) &&
+				    netif_running(dev)) {
+					read_unlock(&in6_dev->lock);
+					goto next_loc6_addr;
+				}
+			}
+			read_unlock(&in6_dev->lock);
+		}
+
+		/* We did not find the address or the interface became NOMULTIPATH.
+		 * We thus have to remove it.
+		 */
+
+		/* Look for the socket and remove him */
+		mptcp_for_each_sk_safe(mpcb, sk, tmpsk) {
+			if (sk->sk_family != AF_INET6 ||
+			    !ipv6_addr_equal(&inet6_sk(sk)->saddr, &mpcb->locaddr6[i].addr))
+				continue;
+
+			mptcp_reinject_data(sk, 0);
+			mptcp_sub_force_close(sk);
+		}
+
+		/* Now, remove the address from the local ones */
+		mpcb->loc6_bits &= ~(1 << i);
+
+		/* Force sending directly the REMOVE_ADDR option */
+		mpcb->remove_addrs |= (1 << mpcb->locaddr6[i].id);
+		sk = mptcp_select_ack_sock(meta_sk, 0);
+		if (sk)
+			tcp_send_ack(sk);
+
+		mptcp_for_each_bit_set(mpcb->rem6_bits, j)
+			mpcb->remaddr6[j].bitfield &= mpcb->loc6_bits;
+
+next_loc6_addr:
+		continue; /* necessary here due to the previous label */
+	}
+#endif
+
 	read_unlock_bh(&dev_base_lock);
 	rcu_read_unlock();
 
@@ -750,7 +977,7 @@ static void mptcp_address_create_worker(struct mptcp_cb *mpcb)
 }
 
 /**
- * React on IPv4-addr add/rem-events
+ * React on IPv4+IPv6-addr add/rem-events
  */
 int mptcp_pm_addr_event_handler(unsigned long event, void *ptr, int family)
 {
@@ -787,8 +1014,14 @@ int mptcp_pm_addr_event_handler(unsigned long event, void *ptr, int family)
 			if (sock_owned_by_user(meta_sk)) {
 				mptcp_address_create_worker(mpcb);
 			} else {
-				mptcp_pm_addr4_event_handler(
-						(struct in_ifaddr *)ptr, event, mpcb);
+				if (family == AF_INET)
+					mptcp_pm_addr4_event_handler(
+							(struct in_ifaddr *)ptr, event, mpcb);
+#if IS_ENABLED(CONFIG_IPV6)
+				else
+					mptcp_pm_addr6_event_handler(
+							(struct inet6_ifaddr *)ptr, event, mpcb);
+#endif
 			}
 
 			bh_unlock_sock(meta_sk);
@@ -839,7 +1072,7 @@ static int mptcp_pm_seq_show(struct seq_file *seq, void *v)
 #if IS_ENABLED(CONFIG_IPV6)
 			} else if (meta_sk->sk_family == AF_INET6) {
 				struct in6_addr *src = &isk->pinet6->saddr;
-				struct in6_addr *dst = &isk->pinet6->daddr;
+				struct in6_addr *dst = &meta_sk->sk_v6_daddr;
 				seq_printf(seq, " 1 %08X%08X%08X%08X:%04X %08X%08X%08X%08X:%04X",
 					   src->s6_addr32[0], src->s6_addr32[1],
 					   src->s6_addr32[2], src->s6_addr32[3],
@@ -914,6 +1147,11 @@ int mptcp_pm_init(void)
 		goto out;
 #endif
 
+#if IS_ENABLED(CONFIG_IPV6)
+	ret = mptcp_pm_v6_init();
+	if (ret)
+		goto mptcp_pm_v6_failed;
+#endif
 	ret = mptcp_pm_v4_init();
 	if (ret)
 		goto mptcp_pm_v4_failed;
@@ -922,6 +1160,11 @@ out:
 	return ret;
 
 mptcp_pm_v4_failed:
+#if IS_ENABLED(CONFIG_IPV6)
+	mptcp_pm_v6_undo();
+
+mptcp_pm_v6_failed:
+#endif
 #ifdef CONFIG_PROC_FS
 	unregister_pernet_subsys(&mptcp_pm_proc_ops);
 #endif
@@ -930,6 +1173,9 @@ mptcp_pm_v4_failed:
 
 void mptcp_pm_undo(void)
 {
+#if IS_ENABLED(CONFIG_IPV6)
+	mptcp_pm_v6_undo();
+#endif
 	mptcp_pm_v4_undo();
 #ifdef CONFIG_PROC_FS
 	unregister_pernet_subsys(&mptcp_pm_proc_ops);

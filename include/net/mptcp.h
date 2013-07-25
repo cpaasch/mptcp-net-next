@@ -31,6 +31,7 @@
 #define _MPTCP_H
 
 #include <linux/inetdevice.h>
+#include <linux/ipv6.h>
 #include <linux/list.h>
 #include <linux/net.h>
 #include <linux/skbuff.h>
@@ -149,6 +150,7 @@ struct mptcp_tcp_sock {
 	u32	last_data_seq;
 	u8	path_index;
 	u8	add_addr4; /* bit-field of addrs not yet sent to our peer */
+	u8	add_addr6;
 	u8	rem_id;
 
 	u32	last_rbuf_opti;	/* Timestamp of last rbuf optimization */
@@ -257,9 +259,16 @@ struct mptcp_cb {
 	u8 loc4_bits; /* Bitfield indicating which of the above addrs are set */
 	u8 next_v4_index;
 
+	struct mptcp_loc6 locaddr6[MPTCP_MAX_ADDR];
+	u8 loc6_bits;
+	u8 next_v6_index;
+
 	/* Remove addresses */
 	struct mptcp_rem4 remaddr4[MPTCP_MAX_ADDR];
 	u8 rem4_bits;
+
+	struct mptcp_rem6 remaddr6[MPTCP_MAX_ADDR];
+	u8 rem6_bits;
 
 	u32 path_index_bits;
 	/* Next pi to pick up in case a new path becomes available */
