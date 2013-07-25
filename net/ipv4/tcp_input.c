@@ -4826,6 +4826,8 @@ static bool tcp_should_expand_sndbuf(const struct sock *sk)
 #ifdef CONFIG_MPTCP
 	if (tp->mpc) {
 		struct sock *sk_it;
+		int cnt_backups = 0;
+		int backup_available = 0;
 
 		/* For MPTCP we look for a subsocket that could send data.
 		 * If we found one, then we update the send-buffer.
@@ -4836,9 +4838,24 @@ static bool tcp_should_expand_sndbuf(const struct sock *sk)
 			if (!mptcp_sk_can_send(sk_it))
 				continue;
 
-			if (tp_it->packets_out < tp_it->snd_cwnd)
+			/* Backup-flows have to be counted - if there is no other
+			 * subflow we take the backup-flow into account. */
+			if (tp_it->mptcp->rcv_low_prio) {
+				cnt_backups++;
+			}
+
+			if (tp_it->packets_out < tp_it->snd_cwnd) {
+				if (tp_it->mptcp->rcv_low_prio) {
+					backup_available = 1;
+					continue;
+				}
 				return 1;
+			}
 		}
+
+		/* Backup-flow is available for sending - update send-buffer */
+		if (tp->mpcb->cnt_established == cnt_backups && backup_available)
+			return 1;
 		return 0;
 	}
 #endif

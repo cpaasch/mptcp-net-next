@@ -204,6 +204,7 @@ static void mptcp_v4_join_request(struct sock *meta_sk, struct sk_buff *skb)
 			(u8 *)&mtreq->mptcp_rem_nonce, (u32 *)mptcp_hash_mac);
 	mtreq->mptcp_hash_tmac = *(u64 *)mptcp_hash_mac;
 	mtreq->rem_id = mopt.rem_id;
+	mtreq->low_prio = mopt.low_prio;
 	tcp_rsk(req)->saw_mpc = 1;
 
 	if (tcp_v4_send_synack(meta_sk, dst, req, skb_get_queue_mapping(skb)))
