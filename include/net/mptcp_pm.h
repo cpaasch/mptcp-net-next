@@ -55,12 +55,42 @@ struct mptcp_loc4 {
 };
 
 struct mptcp_cb;
+#ifdef CONFIG_MPTCP
 
+#define MPTCP_HASH_SIZE                1024
+
+/* This second hashtable is needed to retrieve request socks
+ * created as a result of a join request. While the SYN contains
+ * the token, the final ack does not, so we need a separate hashtable
+ * to retrieve the mpcb.
+ */
+extern struct list_head mptcp_reqsk_htb[MPTCP_HASH_SIZE];
+extern spinlock_t mptcp_reqsk_hlock;	/* hashtable protection */
+
+/* Lock, protecting the two hash-tables that hold the token. Namely,
+ * mptcp_reqsk_tk_htb and tk_hashtable
+ */
+extern spinlock_t mptcp_tk_hashlock;	/* hashtable protection */
+
+void __mptcp_hash_insert(struct tcp_sock *meta_tp, u32 token);
+void mptcp_hash_remove_bh(struct tcp_sock *meta_tp);
+void mptcp_hash_remove(struct tcp_sock *meta_tp);
+void mptcp_reqsk_remove_tk(struct request_sock *reqsk);
+void mptcp_reqsk_new_mptcp(struct request_sock *req,
+			   const struct tcp_options_received *rx_opt,
+			   const struct mptcp_options_received *mopt,
+			   const struct sk_buff *skb);
+void mptcp_connect_init(struct sock *sk);
+int mptcp_pm_init(void);
+void mptcp_pm_undo(void);
+
+#else /* CONFIG_MPTCP */
 static inline void mptcp_reqsk_new_mptcp(struct request_sock *req,
 					 const struct tcp_options_received *rx_opt,
 					 const struct mptcp_options_received *mopt,
 					 const struct sk_buff *skb)
 {}
 static inline void mptcp_hash_remove(struct tcp_sock *meta_tp) {}
+#endif /* CONFIG_MPTCP */
 
 #endif /*_MPTCP_PM_H*/
