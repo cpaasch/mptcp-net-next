@@ -1398,7 +1398,7 @@ void mptcp_established_options(struct sock *sk, struct sk_buff *skb,
 		}
 	}
 
-	if (!tp->mptcp->include_mpc) {
+	if (!tp->mptcp_add_addr_ack && !tp->mptcp->include_mpc) {
 		opts->options |= OPTION_MPTCP;
 		opts->mptcp_options |= OPTION_DATA_ACK;
 		/* If !skb, we come from tcp_current_mss and thus we always
@@ -1419,6 +1419,25 @@ void mptcp_established_options(struct sock *sk, struct sk_buff *skb,
 		}
 
 		*size += MPTCP_SUB_LEN_DSS_ALIGN;
+	}
+
+	if (unlikely(tp->mptcp->add_addr4) &&
+	    MAX_TCP_OPTION_SPACE - *size >= MPTCP_SUB_LEN_ADD_ADDR4_ALIGN) {
+		int ind = mptcp_find_free_index(~(tp->mptcp->add_addr4));
+		opts->options |= OPTION_MPTCP;
+		opts->mptcp_options |= OPTION_ADD_ADDR;
+		opts->addr4 = &mpcb->locaddr4[ind];
+		if (skb)
+			tp->mptcp->add_addr4 &= ~(1 << ind);
+		*size += MPTCP_SUB_LEN_ADD_ADDR4_ALIGN;
+	} else if (!(opts->mptcp_options & OPTION_MP_CAPABLE) &&
+		   !(opts->mptcp_options & OPTION_MP_JOIN) &&
+		   ((unlikely(tp->mptcp->add_addr4) &&
+		     MAX_TCP_OPTION_SPACE - *size >=
+		     MPTCP_SUB_LEN_ADD_ADDR4_ALIGN))) {
+		tp->mptcp_add_addr_ack = 1;
+		tcp_send_ack(sk);
+		tp->mptcp_add_addr_ack = 0;
 	}
 
 	if (skb)
@@ -1455,6 +1474,19 @@ void mptcp_options_write(__be32 *ptr, struct tcp_sock *tp,
 		mpc->h = 1;
 	}
 
+	if (unlikely(OPTION_ADD_ADDR & opts->mptcp_options)) {
+		struct mp_add_addr *mpadd = (struct mp_add_addr *)ptr;
+
+		mpadd->kind = TCPOPT_MPTCP;
+		if (opts->addr4) {
+			mpadd->len = MPTCP_SUB_LEN_ADD_ADDR4;
+			mpadd->sub = MPTCP_SUB_ADD_ADDR;
+			mpadd->ipver = 4;
+			mpadd->addr_id = opts->addr4->id;
+			mpadd->u.v4.addr = opts->addr4->addr;
+			ptr += MPTCP_SUB_LEN_ADD_ADDR4_ALIGN >> 2;
+		}
+	}
 	if (unlikely(OPTION_MP_FAIL & opts->mptcp_options)) {
 		struct mp_fail *mpfail = (struct mp_fail *)ptr;
 

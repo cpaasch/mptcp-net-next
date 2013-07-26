@@ -191,6 +191,93 @@ int mptcp_v4_do_rcv(struct sock *meta_sk, struct sk_buff *skb)
 	return ret;
 }
 
+/****** IPv4-Address event handler ******/
+
+/* React on IP-addr add/rem-events */
+static int mptcp_pm_inetaddr_event(struct notifier_block *this,
+				   unsigned long event, void *ptr)
+{
+	return mptcp_pm_addr_event_handler(event, ptr, AF_INET);
+}
+
+/* React on ifup/down-events */
+static int mptcp_pm_netdev_event(struct notifier_block *this,
+				 unsigned long event, void *ptr)
+{
+	struct net_device *dev = netdev_notifier_info_to_dev(ptr);
+	struct in_device *in_dev;
+
+	if (!(event == NETDEV_UP || event == NETDEV_CHANGE))
+		return NOTIFY_DONE;
+
+	/* Iterate over the addresses of the interface, then we go over the
+	 * mpcb's to modify them - that way we take tk_hash_lock for a shorter
+	 * time at each iteration. - otherwise we would need to take it from the
+	 * beginning till the end.
+	 */
+	rcu_read_lock();
+	in_dev = __in_dev_get_rcu(dev);
+
+	if (in_dev) {
+		for_primary_ifa(in_dev) {
+			mptcp_pm_inetaddr_event(NULL, event, ifa);
+		} endfor_ifa(in_dev);
+	}
+
+	rcu_read_unlock();
+	return NOTIFY_DONE;
+}
+
+void mptcp_pm_addr4_event_handler(struct in_ifaddr *ifa, unsigned long event,
+				  struct mptcp_cb *mpcb)
+{
+	int i;
+
+	if (ifa->ifa_scope > RT_SCOPE_LINK)
+		return;
+
+	/* Look for the address among the local addresses */
+	mptcp_for_each_bit_set(mpcb->loc4_bits, i) {
+		if (mpcb->locaddr4[i].addr.s_addr == ifa->ifa_local)
+			return;
+	}
+
+	/* Not yet in address-list */
+	if (event == NETDEV_UP && netif_running(ifa->ifa_dev->dev)) {
+		i = __mptcp_find_free_index(mpcb->loc4_bits, 0, mpcb->next_v4_index);
+		if (i < 0)
+			return;
+
+		/* update this mpcb */
+		mpcb->locaddr4[i].addr.s_addr = ifa->ifa_local;
+		mpcb->locaddr4[i].id = i;
+		mpcb->loc4_bits |= (1 << i);
+		mpcb->next_v4_index = i + 1;
+		/* re-send addresses */
+		mptcp_v4_send_add_addr(i, mpcb);
+	}
+	return;
+}
+
+/* Send ADD_ADDR for loc_id on all available subflows */
+void mptcp_v4_send_add_addr(int loc_id, struct mptcp_cb *mpcb)
+{
+	struct tcp_sock *tp;
+
+	mptcp_for_each_tp(mpcb, tp)
+		tp->mptcp->add_addr4 |= (1 << loc_id);
+}
+
+static struct notifier_block mptcp_pm_inetaddr_notifier = {
+		.notifier_call = mptcp_pm_inetaddr_event,
+};
+
+static struct notifier_block mptcp_pm_netdev_notifier = {
+		.notifier_call = mptcp_pm_netdev_event,
+};
+
+/****** End of IPv4-Address event handler ******/
+
 /* General initialization of IPv4 for MPTCP */
 int mptcp_pm_v4_init(void)
 {
@@ -210,9 +297,21 @@ int mptcp_pm_v4_init(void)
 		ret =  -ENOMEM;
 		goto err_reqsk_create;
 	}
+
+	ret = register_inetaddr_notifier(&mptcp_pm_inetaddr_notifier);
+	if (ret)
+		goto err_reg_inetaddr;
+	ret = register_netdevice_notifier(&mptcp_pm_netdev_notifier);
+	if (ret)
+		goto err_reg_netdev;
+
 out:
 	return ret;
 
+err_reg_netdev:
+	unregister_inetaddr_notifier(&mptcp_pm_inetaddr_notifier);
+err_reg_inetaddr:
+	kmem_cache_destroy(ops->slab);
 err_reqsk_create:
 	kfree(ops->slab_name);
 	ops->slab_name = NULL;
@@ -221,6 +320,8 @@ err_reqsk_create:
 
 void mptcp_pm_v4_undo(void)
 {
+	unregister_inetaddr_notifier(&mptcp_pm_inetaddr_notifier);
+	unregister_netdevice_notifier(&mptcp_pm_netdev_notifier);
 	kmem_cache_destroy(mptcp_request_sock_ops.slab);
 	kfree(mptcp_request_sock_ops.slab_name);
 }

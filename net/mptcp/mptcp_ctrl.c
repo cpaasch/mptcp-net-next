@@ -711,6 +711,9 @@ int mptcp_alloc_mpcb(struct sock *meta_sk, __u64 remote_key, u32 window)
 
 	mutex_init(&mpcb->mutex);
 
+	/* Initialize workqueue-struct */
+	INIT_WORK(&mpcb->address_work, mptcp_address_worker);
+
 	/* Init the accept_queue structure, we support a queue of 32 pending
 	 * connections, it does not need to be huge, since we only store  here
 	 * pending subflow creations.
@@ -889,14 +892,18 @@ void mptcp_update_metasocket(struct sock *sk, struct sock *meta_sk)
 {
 	struct mptcp_cb *mpcb = tcp_sk(meta_sk)->mpcb;
 
-	mpcb->locaddr4.addr.s_addr = inet_sk(sk)->inet_saddr;
-	mpcb->locaddr4.id = 0;
-	mpcb->locaddr4.port = 0;
+	mpcb->locaddr4[0].addr.s_addr = inet_sk(sk)->inet_saddr;
+	mpcb->locaddr4[0].id = 0;
+	mpcb->locaddr4[0].port = 0;
+	mpcb->loc4_bits |= 1;
+	mpcb->next_v4_index = 1;
 
 	mptcp_v4_add_raddress(mpcb,
 			      (struct in_addr *)&inet_sk(sk)->inet_daddr,
 			      0, 0);
 	mptcp_v4_set_init_addr_bit(mpcb, inet_sk(sk)->inet_daddr);
+
+	mptcp_set_addresses(meta_sk);
 }
 
 /* Clean up the receive buffer for full frames taken by the user,
