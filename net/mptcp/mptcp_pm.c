@@ -193,6 +193,187 @@ void mptcp_hash_remove(struct tcp_sock *meta_tp)
 	rcu_read_unlock();
 }
 
+u8 mptcp_get_loc_addrid(struct mptcp_cb *mpcb, struct sock *sk)
+{
+	int i;
+
+	mptcp_for_each_bit_set(mpcb->loc4_bits, i) {
+		if (mpcb->locaddr4[i].addr.s_addr ==
+				inet_sk(sk)->inet_saddr)
+			return mpcb->locaddr4[i].id;
+	}
+
+	BUG();
+	return 0;
+}
+
+void mptcp_set_addresses(struct sock *meta_sk)
+{
+	struct mptcp_cb *mpcb = tcp_sk(meta_sk)->mpcb;
+	struct net *netns = sock_net(meta_sk);
+	struct net_device *dev;
+
+	rcu_read_lock();
+	read_lock_bh(&dev_base_lock);
+
+	for_each_netdev(netns, dev) {
+		if (netif_running(dev)) {
+			struct in_device *in_dev = __in_dev_get_rcu(dev);
+			struct in_ifaddr *ifa;
+			__be32 ifa_address;
+
+			if (dev->flags & IFF_LOOPBACK)
+				continue;
+
+			if (!in_dev)
+				goto out;
+
+			for (ifa = in_dev->ifa_list; ifa; ifa = ifa->ifa_next) {
+				int i;
+				ifa_address = ifa->ifa_local;
+
+				if (ifa->ifa_scope == RT_SCOPE_HOST)
+					continue;
+
+				if ((meta_sk->sk_family == AF_INET ||
+				     mptcp_v6_is_v4_mapped(meta_sk)) &&
+				    inet_sk(meta_sk)->inet_saddr == ifa_address)
+					continue;
+
+				i = __mptcp_find_free_index(mpcb->loc4_bits, -1,
+							    mpcb->next_v4_index);
+				if (i < 0)
+					goto out;
+
+				mpcb->locaddr4[i].addr.s_addr = ifa_address;
+				mpcb->locaddr4[i].port = 0;
+				mpcb->locaddr4[i].id = i;
+				mpcb->loc4_bits |= (1 << i);
+				mpcb->next_v4_index = i + 1;
+				mptcp_v4_send_add_addr(i, mpcb);
+			}
+		}
+	}
+
+out:
+	read_unlock_bh(&dev_base_lock);
+	rcu_read_unlock();
+}
+
+void mptcp_address_worker(struct work_struct *work)
+{
+	struct mptcp_cb *mpcb = container_of(work, struct mptcp_cb, address_work);
+	struct sock *meta_sk = mpcb->meta_sk;
+	struct net *netns = sock_net(meta_sk);
+	struct net_device *dev;
+
+	mutex_lock(&mpcb->mutex);
+	lock_sock(meta_sk);
+
+	if (sock_flag(meta_sk, SOCK_DEAD))
+		goto exit;
+
+	/* The following is meant to run with bh disabled */
+	local_bh_disable();
+
+	/* First, we iterate over the interfaces to find addresses not yet
+	 * in our local list.
+	 */
+
+	rcu_read_lock();
+	read_lock_bh(&dev_base_lock);
+
+	for_each_netdev(netns, dev) {
+		struct in_device *in_dev = __in_dev_get_rcu(dev);
+		struct in_ifaddr *ifa;
+
+		if (dev->flags & IFF_LOOPBACK)
+			continue;
+
+		if (!in_dev)
+			break;
+
+		for (ifa = in_dev->ifa_list; ifa; ifa = ifa->ifa_next) {
+			unsigned long event;
+
+			if (!netif_running(in_dev->dev)) {
+				continue;
+			} else {
+				/* If it's up, it may have been changed or came up.
+				 * We set NETDEV_CHANGE, to take the good
+				 * code-path in mptcp_pm_addr4_event_handler
+				 */
+				event = NETDEV_CHANGE;
+			}
+
+			mptcp_pm_addr4_event_handler(ifa, event, mpcb);
+		}
+	}
+
+	read_unlock_bh(&dev_base_lock);
+	rcu_read_unlock();
+
+	local_bh_enable();
+exit:
+	release_sock(meta_sk);
+	mutex_unlock(&mpcb->mutex);
+	sock_put(meta_sk);
+}
+
+static void mptcp_address_create_worker(struct mptcp_cb *mpcb)
+{
+	if (!work_pending(&mpcb->address_work)) {
+		sock_hold(mpcb->meta_sk);
+		queue_work(mptcp_wq, &mpcb->address_work);
+	}
+}
+
+/**
+ * React on IPv4-addr add/rem-events
+ */
+int mptcp_pm_addr_event_handler(unsigned long event, void *ptr, int family)
+{
+	struct tcp_sock *meta_tp;
+	int i;
+
+	if (!(event == NETDEV_UP || event == NETDEV_CHANGE))
+		return NOTIFY_DONE;
+
+	/* Now we iterate over the mpcb's */
+	for (i = 0; i < MPTCP_HASH_SIZE; i++) {
+		struct hlist_nulls_node *node;
+		rcu_read_lock_bh();
+		hlist_nulls_for_each_entry_rcu(meta_tp, node, &tk_hashtable[i],
+					       tk_table) {
+			struct mptcp_cb *mpcb = meta_tp->mpcb;
+			struct sock *meta_sk = (struct sock *)meta_tp;
+
+			if (unlikely(!atomic_inc_not_zero(&meta_sk->sk_refcnt)))
+				continue;
+
+			if (!meta_tp->mpc || !is_meta_sk(meta_sk) ||
+			    mpcb->infinite_mapping_snd ||
+			    mpcb->infinite_mapping_rcv) {
+				sock_put(meta_sk);
+				continue;
+			}
+
+			bh_lock_sock(meta_sk);
+			if (sock_owned_by_user(meta_sk)) {
+				mptcp_address_create_worker(mpcb);
+			} else {
+				mptcp_pm_addr4_event_handler(
+						(struct in_ifaddr *)ptr, event, mpcb);
+			}
+
+			bh_unlock_sock(meta_sk);
+			sock_put(meta_sk);
+		}
+		rcu_read_unlock_bh();
+	}
+	return NOTIFY_DONE;
+}
+
 #ifdef CONFIG_PROC_FS
 
 /* Output /proc/net/mptcp */
