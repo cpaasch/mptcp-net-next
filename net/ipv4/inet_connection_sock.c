@@ -23,6 +23,7 @@
 #include <net/route.h>
 #include <net/tcp_states.h>
 #include <net/xfrm.h>
+#include <net/mptcp.h>
 
 #ifdef INET_CSK_DEBUG
 const char inet_csk_timer_bug_msg[] = "inet_csk BUG: unknown timer value\n";
@@ -667,7 +668,12 @@ struct sock *inet_csk_clone_lock(const struct sock *sk,
 				 const struct request_sock *req,
 				 const gfp_t priority)
 {
-	struct sock *newsk = sk_clone_lock(sk, priority);
+	struct sock *newsk;
+
+	if (sk->sk_protocol == IPPROTO_TCP && tcp_sk(sk)->mpc)
+		newsk = mptcp_sk_clone(sk, req->rsk_ops->family, priority);
+	else
+		newsk = sk_clone_lock(sk, priority);
 
 	if (newsk != NULL) {
 		struct inet_connection_sock *newicsk = inet_csk(newsk);
@@ -806,6 +812,8 @@ void inet_csk_listen_stop(struct sock *sk)
 
 		acc_req = req->dl_next;
 
+		if (is_meta_sk(child))
+			mutex_lock(&tcp_sk(child)->mpcb->mutex);
 		local_bh_disable();
 		bh_lock_sock(child);
 		WARN_ON(sock_owned_by_user(child));
@@ -834,6 +842,8 @@ void inet_csk_listen_stop(struct sock *sk)
 
 		bh_unlock_sock(child);
 		local_bh_enable();
+		if (is_meta_sk(child))
+			mutex_unlock(&tcp_sk(child)->mpcb->mutex);
 		sock_put(child);
 
 		sk_acceptq_removed(sk);
