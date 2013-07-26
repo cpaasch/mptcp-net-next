@@ -55,12 +55,20 @@ static struct kmem_cache *mptcp_sock_cache __read_mostly;
 static struct kmem_cache *mptcp_cb_cache __read_mostly;
 static struct kmem_cache *mptcp_tw_cache __read_mostly;
 
+int sysctl_mptcp_ndiffports __read_mostly = 1;
 int sysctl_mptcp_enabled __read_mostly = 1;
 int sysctl_mptcp_checksum __read_mostly = 1;
 int sysctl_mptcp_syn_retries __read_mostly = 3;
 
 #ifdef CONFIG_SYSCTL
 static struct ctl_table mptcp_table[] = {
+	{
+		.procname = "mptcp_ndiffports",
+		.data = &sysctl_mptcp_ndiffports,
+		.maxlen = sizeof(int),
+		.mode = 0644,
+		.proc_handler = &proc_dointvec
+	},
 	{
 		.procname = "mptcp_enabled",
 		.data = &sysctl_mptcp_enabled,
@@ -712,6 +720,8 @@ int mptcp_alloc_mpcb(struct sock *meta_sk, __u64 remote_key, u32 window)
 	mutex_init(&mpcb->mutex);
 
 	/* Initialize workqueue-struct */
+	INIT_WORK(&mpcb->subflow_work, mptcp_create_subflow_worker);
+	INIT_DELAYED_WORK(&mpcb->subflow_retry_work, mptcp_retry_subflow_worker);
 	INIT_WORK(&mpcb->address_work, mptcp_address_worker);
 
 	/* Init the accept_queue structure, we support a queue of 32 pending
@@ -803,7 +813,12 @@ int mptcp_add_sock(struct sock *meta_sk, struct sock *sk, u8 rem_id,
 	if (!tp->mptcp)
 		return -ENOMEM;
 
-	tp->mptcp->path_index = 1;
+	tp->mptcp->path_index = mptcp_set_new_pathindex(mpcb);
+	/* No more space for more subflows? */
+	if (!tp->mptcp->path_index) {
+		kmem_cache_free(mptcp_sock_cache, tp->mptcp);
+		return -EPERM;
+	}
 
 	tp->mptcp->tp = tp;
 	tp->mpcb = mpcb;
@@ -869,6 +884,7 @@ void mptcp_del_sock(struct sock *sk)
 
 	tp->mptcp->next = NULL;
 	tp->mptcp->attached = 0;
+	mpcb->path_index_bits &= ~(1 << tp->mptcp->path_index);
 
 	if (!skb_queue_empty(&sk->sk_write_queue))
 		mptcp_reinject_data(sk, 0);

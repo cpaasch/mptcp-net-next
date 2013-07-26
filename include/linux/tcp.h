@@ -94,9 +94,18 @@ struct tcp_out_options {
 			__u64	sender_key;	/* sender's key for mptcp */
 			__u64	receiver_key;	/* receiver's key for mptcp */
 		} mp_capable;
+
+		struct {
+			__u64	sender_truncated_mac;
+			__u32	sender_nonce;
+					/* random number of the sender */
+			__u32	token;	/* token for mptcp */
+		} mp_join_syns;
 	};
 
 	struct mptcp_loc4 *addr4;/* v4 addresses for MPTCP */
+
+	u8	addr_id;	/* address id */
 #endif /* CONFIG_MPTCP */
 };
 

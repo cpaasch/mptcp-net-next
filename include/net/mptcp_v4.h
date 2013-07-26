@@ -47,6 +47,8 @@ int mptcp_v4_do_rcv(struct sock *meta_sk, struct sk_buff *skb);
 int mptcp_v4_add_raddress(struct mptcp_cb *mpcb, const struct in_addr *addr,
 			  __be16 port, u8 id);
 void mptcp_v4_set_init_addr_bit(struct mptcp_cb *mpcb, __be32 daddr);
+int mptcp_init4_subsockets(struct sock *meta_sk, const struct mptcp_loc4 *loc,
+			   struct mptcp_rem4 *rem);
 void mptcp_pm_addr4_event_handler(struct in_ifaddr *ifa, unsigned long event,
 				  struct mptcp_cb *mpcb);
 int mptcp_pm_v4_init(void);

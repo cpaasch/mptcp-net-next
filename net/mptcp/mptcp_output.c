@@ -1302,20 +1302,34 @@ void mptcp_syn_options(struct sock *sk, struct tcp_out_options *opts,
 	struct tcp_sock *tp = tcp_sk(sk);
 
 	opts->options |= OPTION_MPTCP;
-	opts->mptcp_options |= OPTION_MP_CAPABLE | OPTION_TYPE_SYN;
-	*remaining -= MPTCP_SUB_LEN_CAPABLE_SYN_ALIGN;
-	opts->mp_capable.sender_key = tp->mptcp_loc_key;
-	opts->dss_csum = sysctl_mptcp_checksum;
+	if (is_master_tp(tp)) {
+		opts->mptcp_options |= OPTION_MP_CAPABLE | OPTION_TYPE_SYN;
+		*remaining -= MPTCP_SUB_LEN_CAPABLE_SYN_ALIGN;
+		opts->mp_capable.sender_key = tp->mptcp_loc_key;
+		opts->dss_csum = sysctl_mptcp_checksum;
 
-	/* We arrive here either when sending a SYN or a
-	 * SYN+ACK when in SYN_SENT state (that is, tcp_synack_options
-	 * is only called for syn+ack replied by a server, while this
-	 * function is called when SYNs are sent by both parties and
-	 * are crossed)
-	 * Due to this possibility, a slave subsocket may arrive here,
-	 * and does not need to set the dataseq options, since
-	 * there is no data in the segment
-	 */
+		/* We arrive here either when sending a SYN or a
+		 * SYN+ACK when in SYN_SENT state (that is, tcp_synack_options
+		 * is only called for syn+ack replied by a server, while this
+		 * function is called when SYNs are sent by both parties and
+		 * are crossed)
+		 * Due to this possibility, a slave subsocket may arrive here,
+		 * and does not need to set the dataseq options, since
+		 * there is no data in the segment
+		 */
+	} else {
+		struct mptcp_cb *mpcb = tp->mpcb;
+
+		opts->mptcp_options |= OPTION_MP_JOIN | OPTION_TYPE_SYN;
+		*remaining -= MPTCP_SUB_LEN_JOIN_SYN_ALIGN;
+		opts->mp_join_syns.token = mpcb->mptcp_rem_token;
+		opts->addr_id = mptcp_get_loc_addrid(mpcb, sk);
+
+		if (!tp->mptcp->nonce_set)
+			mptcp_set_nonce(sk);
+
+		opts->mp_join_syns.sender_nonce = tp->mptcp->mptcp_loc_nonce;
+	}
 }
 
 void mptcp_synack_options(struct request_sock *req,
@@ -1474,6 +1488,33 @@ void mptcp_options_write(__be32 *ptr, struct tcp_sock *tp,
 		mpc->h = 1;
 	}
 
+	if (unlikely(OPTION_MP_JOIN & opts->mptcp_options)) {
+		struct mp_join *mpj = (struct mp_join *)ptr;
+
+		mpj->kind = TCPOPT_MPTCP;
+		mpj->sub = MPTCP_SUB_JOIN;
+		mpj->rsv = 0;
+		mpj->addr_id = opts->addr_id;
+
+		if (OPTION_TYPE_SYN & opts->mptcp_options) {
+			mpj->len = MPTCP_SUB_LEN_JOIN_SYN;
+			mpj->u.syn.token = opts->mp_join_syns.token;
+			mpj->u.syn.nonce = opts->mp_join_syns.sender_nonce;
+			mpj->b = 0;
+			ptr += MPTCP_SUB_LEN_JOIN_SYN_ALIGN >> 2;
+		} else if (OPTION_TYPE_SYNACK & opts->mptcp_options) {
+			mpj->len = MPTCP_SUB_LEN_JOIN_SYNACK;
+			mpj->u.synack.mac =
+				opts->mp_join_syns.sender_truncated_mac;
+			mpj->u.synack.nonce = opts->mp_join_syns.sender_nonce;
+			mpj->b = 0;
+			ptr += MPTCP_SUB_LEN_JOIN_SYNACK_ALIGN >> 2;
+		} else if (OPTION_TYPE_ACK & opts->mptcp_options) {
+			mpj->len = MPTCP_SUB_LEN_JOIN_ACK;
+			memcpy(mpj->u.ack.mac, &tp->mptcp->sender_mac[0], 20);
+			ptr += MPTCP_SUB_LEN_JOIN_ACK_ALIGN >> 2;
+		}
+	}
 	if (unlikely(OPTION_ADD_ADDR & opts->mptcp_options)) {
 		struct mp_add_addr *mpadd = (struct mp_add_addr *)ptr;
 
