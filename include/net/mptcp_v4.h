@@ -41,10 +41,23 @@
 extern struct request_sock_ops mptcp_request_sock_ops;
 extern struct proto mptcp_prot;
 
+#ifdef CONFIG_MPTCP
+
+int mptcp_v4_do_rcv(struct sock *meta_sk, struct sk_buff *skb);
+int mptcp_pm_v4_init(void);
+void mptcp_pm_v4_undo(void);
+void mptcp_v4_send_add_addr(int loc_id, struct mptcp_cb *mpcb);
+u32 mptcp_v4_get_nonce(__be32 saddr, __be32 daddr, __be16 sport, __be16 dport,
+		       u32 seq);
+u64 mptcp_v4_get_key(__be32 saddr, __be32 daddr, __be16 sport, __be16 dport);
+
+#else
+
 static inline int mptcp_v4_do_rcv(const struct sock *meta_sk,
 				  const struct sk_buff *skb)
 {
 	return 0;
 }
+#endif /* CONFIG_MPTCP */
 
 #endif /* MPTCP_V4_H_ */
