@@ -80,6 +80,9 @@ extern spinlock_t mptcp_reqsk_hlock;	/* hashtable protection */
  */
 extern spinlock_t mptcp_tk_hashlock;	/* hashtable protection */
 
+void mptcp_create_subflows(struct sock *meta_sk);
+void mptcp_create_subflow_worker(struct work_struct *work);
+void mptcp_retry_subflow_worker(struct work_struct *work);
 u8 mptcp_get_loc_addrid(struct mptcp_cb *mpcb, struct sock *sk);
 void __mptcp_hash_insert(struct tcp_sock *meta_tp, u32 token);
 void mptcp_hash_remove_bh(struct tcp_sock *meta_tp);
