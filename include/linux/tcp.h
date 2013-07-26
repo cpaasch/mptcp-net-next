@@ -88,6 +88,13 @@ struct tcp_out_options {
 
 	__u32	data_seq;	/* data sequence number, for MPTCP */
 	__u32	data_ack;	/* data ack, for MPTCP */
+
+	union {
+		struct {
+			__u64	sender_key;	/* sender's key for mptcp */
+			__u64	receiver_key;	/* receiver's key for mptcp */
+		} mp_capable;
+	};
 #endif /* CONFIG_MPTCP */
 };
 
