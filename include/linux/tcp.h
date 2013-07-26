@@ -81,6 +81,14 @@ struct tcp_out_options {
 	__u8	*hash_location;	/* temporary pointer, overloaded */
 	__u32	tsval, tsecr;	/* need to include OPTION_TS */
 	struct tcp_fastopen_cookie *fastopen_cookie;	/* Fast open cookie */
+#ifdef CONFIG_MPTCP
+	u16	mptcp_options;	/* bit field of MPTCP related OPTION_* */
+	__sum16	dss_csum;	/* Overloaded field: dss-checksum required
+				 * (for SYN-packets)? Or dss-csum itself */
+
+	__u32	data_seq;	/* data sequence number, for MPTCP */
+	__u32	data_ack;	/* data ack, for MPTCP */
+#endif /* CONFIG_MPTCP */
 };
 
 /*These are used to set the sack_ok field in struct tcp_options_received */
@@ -105,6 +113,9 @@ struct tcp_options_received {
 	u16	user_mss;	/* mss requested by user in ioctl	*/
 	u16	mss_clamp;	/* Maximal mss, negotiated at connection setup */
 };
+
+struct mptcp_cb;
+struct mptcp_tcp_sock;
 
 static inline void tcp_clear_options(struct tcp_options_received *rx_opt)
 {
@@ -134,6 +145,7 @@ struct tcp_request_sock {
 						  * FastOpen it's the seq#
 						  * after data-in-SYN.
 						  */
+	u8				saw_mpc:1;
 };
 
 static inline struct tcp_request_sock *tcp_rsk(const struct request_sock *req)
@@ -334,6 +346,33 @@ struct tcp_sock {
 	 * socket. Used to retransmit SYNACKs etc.
 	 */
 	struct request_sock *fastopen_rsk;
+
+
+	struct mptcp_cb		*mpcb;
+	struct sock		*meta_sk;
+	/* We keep these flags even if CONFIG_MPTCP is not checked, because
+	 * it allows checking MPTCP capability just by checking the mpc flag,
+	 * rather than adding ifdefs everywhere.
+	 */
+	u16     mpc:1,          /* Other end is multipath capable */
+		inside_tk_table:1, /* Is the tcp_sock inside the token-table? */
+		send_mp_fclose:1,
+		request_mptcp:1, /* Did we send out an MP_CAPABLE?
+				  * (this speeds up mptcp_doit() in tcp_recvmsg)
+				  */
+		pf:1, /* Potentially Failed state: when this flag is set, we
+		       * stop using the subflow
+		       */
+		mp_killed:1, /* Killed with a tcp_done in mptcp? */
+		was_meta_sk:1,	/* This was a meta sk (in case of reuse) */
+		close_it:1,	/* Must close socket in mptcp_data_ready? */
+		closing:1;
+	struct mptcp_tcp_sock *mptcp;
+#ifdef CONFIG_MPTCP
+	struct hlist_nulls_node tk_table;
+	u32		mptcp_loc_token;
+	u64		mptcp_loc_key;
+#endif /* CONFIG_MPTCP */
 };
 
 enum tsq_flags {
@@ -363,6 +402,7 @@ struct tcp_timewait_sock {
 #ifdef CONFIG_TCP_MD5SIG
 	struct tcp_md5sig_key	  *tw_md5_key;
 #endif
+	struct mptcp_tw		  *mptcp_tw;
 };
 
 static inline struct tcp_timewait_sock *tcp_twsk(const struct sock *sk)
