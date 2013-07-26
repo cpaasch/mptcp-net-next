@@ -166,6 +166,7 @@ struct mptcp_cb {
 
 	u16	send_infinite_mapping:1,
 		in_time_wait:1,
+		list_rcvd:1, /* XXX TO REMOVE */
 		dss_csum:1,
 		server_side:1,
 		infinite_mapping_rcv:1,
@@ -186,6 +187,9 @@ struct mptcp_cb {
 	struct sk_buff_head reinject_queue;
 
 	u8 dfin_path_index;
+	/* Worker struct for subflow establishment */
+	struct work_struct subflow_work;
+	struct delayed_work subflow_retry_work;
 	/* Worker to handle interface/address changes if socket is owned */
 	struct work_struct address_work;
 	/* Mutex needed, because otherwise mptcp_close will complain that the
@@ -221,6 +225,10 @@ struct mptcp_cb {
 	/* Remove addresses */
 	struct mptcp_rem4 remaddr4[MPTCP_MAX_ADDR];
 	u8 rem4_bits;
+
+	u32 path_index_bits;
+	/* Next pi to pick up in case a new path becomes available */
+	u8 next_path_index;
 
 	/* Original snd/rcvbuf of the initial subflow.
 	 * Used for the new subflows on the server-side to allow correct
@@ -960,6 +968,34 @@ exit:
 static inline int mptcp_find_free_index(u8 bitfield)
 {
 	return __mptcp_find_free_index(bitfield, -1, 0);
+}
+
+/* Find the first index whose bit in the bit-field == 0 */
+static inline u8 mptcp_set_new_pathindex(struct mptcp_cb *mpcb)
+{
+	u8 base = mpcb->next_path_index;
+	int i;
+
+	/* Start at 1, because 0 is reserved for the meta-sk */
+	mptcp_for_each_bit_unset(mpcb->path_index_bits >> base, i) {
+		if (i + base < 1)
+			continue;
+		if (i + base >= sizeof(mpcb->path_index_bits) * 8)
+			break;
+		i += base;
+		mpcb->path_index_bits |= (1 << i);
+		mpcb->next_path_index = i + 1;
+		return i;
+	}
+	mptcp_for_each_bit_unset(mpcb->path_index_bits, i) {
+		if (i < 1)
+			continue;
+		mpcb->path_index_bits |= (1 << i);
+		mpcb->next_path_index = i + 1;
+		return i;
+	}
+
+	return 0;
 }
 
 static inline int mptcp_v6_is_v4_mapped(struct sock *sk)
