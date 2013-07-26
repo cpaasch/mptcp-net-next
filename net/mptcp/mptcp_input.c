@@ -1306,6 +1306,34 @@ void mptcp_parse_options(const uint8_t *ptr, int opsize,
 
 		break;
 	}
+	case MPTCP_SUB_JOIN:
+	{
+		struct mp_join *mpjoin = (struct mp_join *)ptr;
+
+		if (opsize != MPTCP_SUB_LEN_JOIN_SYN &&
+		    opsize != MPTCP_SUB_LEN_JOIN_SYNACK &&
+		    opsize != MPTCP_SUB_LEN_JOIN_ACK)
+			break;
+
+		switch (opsize) {
+		case MPTCP_SUB_LEN_JOIN_SYN:
+			mopt->is_mp_join = 1;
+			mopt->rem_id = mpjoin->addr_id;
+			mopt->mptcp_rem_token = mpjoin->u.syn.token;
+			mopt->mptcp_recv_nonce = mpjoin->u.syn.nonce;
+			break;
+		case MPTCP_SUB_LEN_JOIN_SYNACK:
+			mopt->rem_id = mpjoin->addr_id;
+			mopt->mptcp_recv_tmac = mpjoin->u.synack.mac;
+			mopt->mptcp_recv_nonce = mpjoin->u.synack.nonce;
+			break;
+		case MPTCP_SUB_LEN_JOIN_ACK:
+			mopt->join_ack = 1;
+			memcpy(mopt->mptcp_recv_mac, mpjoin->u.ack.mac, 20);
+			break;
+		}
+		break;
+	}
 	case MPTCP_SUB_DSS:
 	{
 		struct mp_dss *mdss = (struct mp_dss *)ptr;
@@ -1561,6 +1589,14 @@ int mptcp_handle_options(struct sock *sk, const struct tcphdr *th, struct sk_buf
 
 		mptcp_sub_force_close(sk);
 		return 1;
+	}
+
+	/* We have to acknowledge retransmissions of the third
+	 * ack.
+	 */
+	if (mopt->join_ack) {
+		tcp_send_delayed_ack(sk);
+		mopt->join_ack = 0;
 	}
 
 	if (mopt->saw_add_addr) {

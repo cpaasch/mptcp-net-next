@@ -83,10 +83,15 @@ extern spinlock_t mptcp_tk_hashlock;	/* hashtable protection */
 void mptcp_create_subflows(struct sock *meta_sk);
 void mptcp_create_subflow_worker(struct work_struct *work);
 void mptcp_retry_subflow_worker(struct work_struct *work);
+struct mp_join *mptcp_find_join(struct sk_buff *skb);
 u8 mptcp_get_loc_addrid(struct mptcp_cb *mpcb, struct sock *sk);
 void __mptcp_hash_insert(struct tcp_sock *meta_tp, u32 token);
 void mptcp_hash_remove_bh(struct tcp_sock *meta_tp);
 void mptcp_hash_remove(struct tcp_sock *meta_tp);
+struct sock *mptcp_hash_find(struct net *net, u32 token);
+int mptcp_lookup_join(struct sk_buff *skb, struct inet_timewait_sock *tw);
+int mptcp_do_join_short(struct sk_buff *skb, struct mptcp_options_received *mopt,
+			struct tcp_options_received *tmp_opt, struct net *net);
 void mptcp_reqsk_remove_tk(struct request_sock *reqsk);
 void mptcp_reqsk_new_mptcp(struct request_sock *req,
 			   const struct tcp_options_received *rx_opt,
@@ -94,6 +99,7 @@ void mptcp_reqsk_new_mptcp(struct request_sock *req,
 			   const struct sk_buff *skb);
 void mptcp_connect_init(struct sock *sk);
 void mptcp_set_addresses(struct sock *meta_sk);
+int mptcp_check_req(struct sk_buff *skb, struct net *net);
 void mptcp_address_worker(struct work_struct *work);
 int mptcp_pm_addr_event_handler(unsigned long event, void *ptr, int family);
 int mptcp_pm_init(void);

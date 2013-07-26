@@ -1339,10 +1339,30 @@ void mptcp_synack_options(struct request_sock *req,
 	mtreq = mptcp_rsk(req);
 
 	opts->options |= OPTION_MPTCP;
-	opts->mptcp_options |= OPTION_MP_CAPABLE | OPTION_TYPE_SYNACK;
-	*remaining -= MPTCP_SUB_LEN_CAPABLE_SYN_ALIGN;
-	opts->mp_capable.sender_key = mtreq->mptcp_loc_key;
-	opts->dss_csum = sysctl_mptcp_checksum || mtreq->dss_csum;
+	/* MPCB not yet set - thus it's a new MPTCP-session */
+	if (!mtreq->mpcb) {
+		opts->mptcp_options |= OPTION_MP_CAPABLE | OPTION_TYPE_SYNACK;
+		*remaining -= MPTCP_SUB_LEN_CAPABLE_SYN_ALIGN;
+		opts->mp_capable.sender_key = mtreq->mptcp_loc_key;
+		opts->dss_csum = sysctl_mptcp_checksum || mtreq->dss_csum;
+	} else {
+		struct inet_request_sock *ireq = inet_rsk(req);
+		int i;
+
+		opts->mptcp_options |= OPTION_MP_JOIN | OPTION_TYPE_SYNACK;
+		opts->mp_join_syns.sender_truncated_mac =
+				mtreq->mptcp_hash_tmac;
+		opts->mp_join_syns.sender_nonce = mtreq->mptcp_loc_nonce;
+		opts->addr_id = 0;
+
+		/* Finding Address ID */
+		mptcp_for_each_bit_set(mtreq->mpcb->loc4_bits, i) {
+			struct mptcp_loc4 *addr = &mtreq->mpcb->locaddr4[i];
+			if (addr->addr.s_addr == ireq->loc_addr)
+				opts->addr_id = addr->id;
+		}
+		*remaining -= MPTCP_SUB_LEN_JOIN_SYNACK_ALIGN;
+	}
 }
 
 void mptcp_established_options(struct sock *sk, struct sk_buff *skb,

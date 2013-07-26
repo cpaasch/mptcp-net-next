@@ -1412,6 +1412,75 @@ int mptcp_check_req_master(struct sock *sk, struct sock *child,
 	return 0;
 }
 
+struct sock *mptcp_check_req_child(struct sock *meta_sk, struct sock *child,
+				   struct request_sock *req,
+				   struct request_sock **prev,
+				   struct mptcp_options_received *mopt)
+{
+	struct tcp_sock *child_tp = tcp_sk(child);
+	struct mptcp_request_sock *mtreq = mptcp_rsk(req);
+	struct mptcp_cb *mpcb = mtreq->mpcb;
+	u8 hash_mac_check[20];
+
+	child_tp->inside_tk_table = 0;
+
+	if (!mopt->join_ack)
+		goto teardown;
+
+	mptcp_hmac_sha1((u8 *)&mpcb->mptcp_rem_key,
+			(u8 *)&mpcb->mptcp_loc_key,
+			(u8 *)&mtreq->mptcp_rem_nonce,
+			(u8 *)&mtreq->mptcp_loc_nonce,
+			(u32 *)hash_mac_check);
+
+	if (memcmp(hash_mac_check, (char *)&mopt->mptcp_recv_mac, 20))
+		goto teardown;
+
+	/* Point it to the same struct socket and wq as the meta_sk */
+	sk_set_socket(child, meta_sk->sk_socket);
+	child->sk_wq = meta_sk->sk_wq;
+
+	if (mptcp_add_sock(meta_sk, child, mtreq->rem_id, GFP_ATOMIC)) {
+		child_tp->mpc = 0; /* Has been inherited, but now
+				    * child_tp->mptcp is NULL
+				    */
+		/* TODO when we support acking the third ack for new subflows,
+		 * we should silently discard this third ack, by returning NULL.
+		 *
+		 * Maybe, at the retransmission we will have enough memory to
+		 * fully add the socket to the meta-sk.
+		 */
+		goto teardown;
+	}
+
+	/* We should allow proper increase of the snd/rcv-buffers. Thus, we
+	 * use the original values instead of the bloated up ones from the
+	 * clone.
+	 */
+	child->sk_sndbuf = mpcb->orig_sk_sndbuf;
+	child->sk_rcvbuf = mpcb->orig_sk_rcvbuf;
+
+	child_tp->mptcp->slave_sk = 1;
+	child_tp->mptcp->snt_isn = tcp_rsk(req)->snt_isn;
+	child_tp->mptcp->rcv_isn = tcp_rsk(req)->rcv_isn;
+	child_tp->mptcp->init_rcv_wnd = req->rcv_wnd;
+
+	child_tp->tsq_flags = 0;
+
+	/* Subflows do not use the accept queue, as they
+	 * are attached immediately to the mpcb.
+	 */
+	inet_csk_reqsk_queue_drop(meta_sk, req, prev);
+	return child;
+
+teardown:
+	/* Drop this request - sock creation failed. */
+	inet_csk_reqsk_queue_drop(meta_sk, req, prev);
+	inet_csk_prepare_forced_close(child);
+	tcp_done(child);
+	return meta_sk;
+}
+
 int mptcp_time_wait(struct sock *sk, struct tcp_timewait_sock *tw)
 {
 	struct mptcp_tw *mptw;
