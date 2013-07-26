@@ -46,6 +46,9 @@ static inline int before64(const u64 seq1, const u64 seq2)
 static inline void mptcp_become_fully_estab(struct sock *sk)
 {
 	tcp_sk(sk)->mptcp->fully_established = 1;
+
+	if (is_master_tp(tcp_sk(sk)))
+		mptcp_create_subflows(mptcp_meta_sk(sk));
 }
 
 /* Similar to tcp_tso_acked without any memory accounting */
@@ -1526,6 +1529,16 @@ static inline int mptcp_mp_fail_rcvd(struct sock *sk, const struct tcphdr *th)
 	return 0;
 }
 
+static inline void mptcp_path_array_check(struct sock *meta_sk)
+{
+	struct mptcp_cb *mpcb = tcp_sk(meta_sk)->mpcb;
+
+	if (unlikely(mpcb->list_rcvd)) {
+		mpcb->list_rcvd = 0;
+		mptcp_create_subflows(meta_sk);
+	}
+}
+
 int mptcp_handle_options(struct sock *sk, const struct tcphdr *th, struct sk_buff *skb)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
@@ -1564,6 +1577,7 @@ int mptcp_handle_options(struct sock *sk, const struct tcphdr *th, struct sk_buf
 
 	mptcp_data_ack(sk, skb);
 
+	mptcp_path_array_check(mptcp_meta_sk(sk));
 	/* Socket may have been mp_killed by a REMOVE_ADDR */
 	if (tp->mp_killed)
 		return 1;

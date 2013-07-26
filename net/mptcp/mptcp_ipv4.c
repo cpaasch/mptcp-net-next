@@ -118,6 +118,7 @@ int mptcp_v4_add_raddress(struct mptcp_cb *mpcb, const struct in_addr *addr,
 			/* update the address */
 			rem4->addr.s_addr = addr->s_addr;
 			rem4->port = port;
+			mpcb->list_rcvd = 1;
 			return 0;
 		}
 	}
@@ -135,6 +136,7 @@ int mptcp_v4_add_raddress(struct mptcp_cb *mpcb, const struct in_addr *addr,
 	rem4->bitfield = 0;
 	rem4->retry_bitfield = 0;
 	rem4->id = id;
+	mpcb->list_rcvd = 1;
 	mpcb->rem4_bits |= (1 << i);
 
 	return 0;
@@ -188,6 +190,88 @@ int mptcp_v4_do_rcv(struct sock *meta_sk, struct sk_buff *skb)
 	ret = tcp_v4_do_rcv(sk, skb);
 	sock_put(sk);
 
+	return ret;
+}
+
+/* Create a new IPv4 subflow.
+ *
+ * We are in user-context and meta-sock-lock is hold.
+ */
+int mptcp_init4_subsockets(struct sock *meta_sk, const struct mptcp_loc4 *loc,
+			   struct mptcp_rem4 *rem)
+{
+	struct tcp_sock *tp;
+	struct sock *sk;
+	struct sockaddr_in loc_in, rem_in;
+	struct socket sock;
+	int ulid_size = 0, ret;
+
+	/* Don't try again - even if it fails */
+	rem->bitfield |= (1 << loc->id);
+
+	/** First, create and prepare the new socket */
+
+	sock.type = meta_sk->sk_socket->type;
+	sock.state = SS_UNCONNECTED;
+	sock.wq = meta_sk->sk_socket->wq;
+	sock.file = meta_sk->sk_socket->file;
+	sock.ops = NULL;
+
+	ret = inet_create(sock_net(meta_sk), &sock, IPPROTO_TCP, 1);
+	if (unlikely(ret < 0))
+		return ret;
+
+	sk = sock.sk;
+	tp = tcp_sk(sk);
+
+	/* All subsockets need the MPTCP-lock-class */
+	lockdep_set_class_and_name(&(sk)->sk_lock.slock, &meta_slock_key, "slock-AF_INET-MPTCP");
+	lockdep_init_map(&(sk)->sk_lock.dep_map, "sk_lock-AF_INET-MPTCP", &meta_key, 0);
+
+	if (mptcp_add_sock(meta_sk, sk, rem->id, GFP_KERNEL))
+		goto error;
+
+	tp->mptcp->slave_sk = 1;
+
+	/* Initializing the timer for an MPTCP subflow */
+	setup_timer(&tp->mptcp->mptcp_ack_timer, mptcp_ack_handler, (unsigned long)sk);
+
+	/** Then, connect the socket to the peer */
+
+	ulid_size = sizeof(struct sockaddr_in);
+	loc_in.sin_family = AF_INET;
+	rem_in.sin_family = AF_INET;
+	loc_in.sin_port = 0;
+	if (rem->port)
+		rem_in.sin_port = rem->port;
+	else
+		rem_in.sin_port = inet_sk(meta_sk)->inet_dport;
+	loc_in.sin_addr = loc->addr;
+	rem_in.sin_addr = rem->addr;
+
+	ret = sock.ops->bind(&sock, (struct sockaddr *)&loc_in, ulid_size);
+	if (ret < 0)
+		goto error;
+
+	ret = sock.ops->connect(&sock, (struct sockaddr *)&rem_in,
+				ulid_size, O_NONBLOCK);
+	if (ret < 0 && ret != -EINPROGRESS)
+		goto error;
+
+	sk_set_socket(sk, meta_sk->sk_socket);
+	sk->sk_wq = meta_sk->sk_wq;
+
+	return 0;
+
+error:
+	/* May happen if mptcp_add_sock fails first */
+	if (!tp->mpc) {
+		tcp_close(sk, 0);
+	} else {
+		local_bh_disable();
+		mptcp_sub_force_close(sk);
+		local_bh_enable();
+	}
 	return ret;
 }
 
@@ -255,6 +339,8 @@ void mptcp_pm_addr4_event_handler(struct in_ifaddr *ifa, unsigned long event,
 		mpcb->next_v4_index = i + 1;
 		/* re-send addresses */
 		mptcp_v4_send_add_addr(i, mpcb);
+		/* re-evaluate paths */
+		mptcp_create_subflows(mpcb->meta_sk);
 	}
 	return;
 }
