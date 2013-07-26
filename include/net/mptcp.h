@@ -115,6 +115,7 @@ struct mptcp_tcp_sock {
 	u32	rcv_isn;
 	u32	last_data_seq;
 	u8	path_index;
+	u8	add_addr4; /* bit-field of addrs not yet sent to our peer */
 	u8	rem_id;
 
 	u32	last_rbuf_opti;	/* Timestamp of last rbuf optimization */
@@ -185,6 +186,8 @@ struct mptcp_cb {
 	struct sk_buff_head reinject_queue;
 
 	u8 dfin_path_index;
+	/* Worker to handle interface/address changes if socket is owned */
+	struct work_struct address_work;
 	/* Mutex needed, because otherwise mptcp_close will complain that the
 	 * socket is owned by the user.
 	 * E.g., mptcp_sub_close_wq is taking the meta-lock.
@@ -211,7 +214,9 @@ struct mptcp_cb {
 				      struct dst_entry *dst);
 
 	/* Local addresses */
-	struct mptcp_loc4 locaddr4;
+	struct mptcp_loc4 locaddr4[MPTCP_MAX_ADDR];
+	u8 loc4_bits; /* Bitfield indicating which of the above addrs are set */
+	u8 next_v4_index;
 
 	/* Remove addresses */
 	struct mptcp_rem4 remaddr4[MPTCP_MAX_ADDR];
@@ -299,6 +304,7 @@ struct mptcp_cb {
 #define OPTION_TYPE_ACK		(1 << 2)
 #define OPTION_MP_CAPABLE	(1 << 3)
 #define OPTION_DATA_ACK		(1 << 4)
+#define OPTION_ADD_ADDR		(1 << 5)
 #define OPTION_MP_JOIN		(1 << 6)
 #define OPTION_MP_FAIL		(1 << 7)
 #define OPTION_MP_FCLOSE	(1 << 8)

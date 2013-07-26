@@ -80,6 +80,7 @@ extern spinlock_t mptcp_reqsk_hlock;	/* hashtable protection */
  */
 extern spinlock_t mptcp_tk_hashlock;	/* hashtable protection */
 
+u8 mptcp_get_loc_addrid(struct mptcp_cb *mpcb, struct sock *sk);
 void __mptcp_hash_insert(struct tcp_sock *meta_tp, u32 token);
 void mptcp_hash_remove_bh(struct tcp_sock *meta_tp);
 void mptcp_hash_remove(struct tcp_sock *meta_tp);
@@ -89,6 +90,9 @@ void mptcp_reqsk_new_mptcp(struct request_sock *req,
 			   const struct mptcp_options_received *mopt,
 			   const struct sk_buff *skb);
 void mptcp_connect_init(struct sock *sk);
+void mptcp_set_addresses(struct sock *meta_sk);
+void mptcp_address_worker(struct work_struct *work);
+int mptcp_pm_addr_event_handler(unsigned long event, void *ptr, int family);
 int mptcp_pm_init(void);
 void mptcp_pm_undo(void);
 

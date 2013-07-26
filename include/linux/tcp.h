@@ -95,6 +95,8 @@ struct tcp_out_options {
 			__u64	receiver_key;	/* receiver's key for mptcp */
 		} mp_capable;
 	};
+
+	struct mptcp_loc4 *addr4;/* v4 addresses for MPTCP */
 #endif /* CONFIG_MPTCP */
 };
 
@@ -371,6 +373,8 @@ struct tcp_sock {
 		       * stop using the subflow
 		       */
 		mp_killed:1, /* Killed with a tcp_done in mptcp? */
+		mptcp_add_addr_ack:1,	/* Tell tcp_send_ack to return in case
+					 * alloc_skb fails. */
 		was_meta_sk:1,	/* This was a meta sk (in case of reuse) */
 		close_it:1,	/* Must close socket in mptcp_data_ready? */
 		closing:1;
