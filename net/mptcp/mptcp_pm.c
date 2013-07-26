@@ -213,6 +213,12 @@ void mptcp_set_addresses(struct sock *meta_sk)
 	struct net *netns = sock_net(meta_sk);
 	struct net_device *dev;
 
+	/* if multiports is requested, we work with the main address
+	 * and play only with the ports
+	 */
+	if (sysctl_mptcp_ndiffports > 1)
+		return;
+
 	rcu_read_lock();
 	read_lock_bh(&dev_base_lock);
 
@@ -258,6 +264,136 @@ void mptcp_set_addresses(struct sock *meta_sk)
 out:
 	read_unlock_bh(&dev_base_lock);
 	rcu_read_unlock();
+}
+
+void mptcp_retry_subflow_worker(struct work_struct *work)
+{
+	struct delayed_work *delayed_work =
+		container_of(work, struct delayed_work, work);
+	struct mptcp_cb *mpcb =
+		container_of(delayed_work, struct mptcp_cb, subflow_retry_work);
+	struct sock *meta_sk = mpcb->meta_sk;
+	int iter = 0, i;
+
+next_subflow:
+	if (iter) {
+		release_sock(meta_sk);
+		mutex_unlock(&mpcb->mutex);
+
+		yield();
+	}
+	mutex_lock(&mpcb->mutex);
+	lock_sock_nested(meta_sk, SINGLE_DEPTH_NESTING);
+
+	iter++;
+
+	if (sock_flag(meta_sk, SOCK_DEAD))
+		goto exit;
+
+	mptcp_for_each_bit_set(mpcb->rem4_bits, i) {
+		struct mptcp_rem4 *rem = &mpcb->remaddr4[i];
+		/* Do we need to retry establishing a subflow ? */
+		if (rem->retry_bitfield) {
+			int i = mptcp_find_free_index(~rem->retry_bitfield);
+			mptcp_init4_subsockets(meta_sk, &mpcb->locaddr4[i], rem);
+			rem->retry_bitfield &= ~(1 << mpcb->locaddr4[i].id);
+			goto next_subflow;
+		}
+	}
+
+exit:
+	release_sock(meta_sk);
+	mutex_unlock(&mpcb->mutex);
+	sock_put(meta_sk);
+}
+
+/**
+ * Create all new subflows, by doing calls to mptcp_initX_subsockets
+ *
+ * This function uses a goto next_subflow, to allow releasing the lock between
+ * new subflows and giving other processes a chance to do some work on the
+ * socket and potentially finishing the communication.
+ **/
+void mptcp_create_subflow_worker(struct work_struct *work)
+{
+	struct mptcp_cb *mpcb = container_of(work, struct mptcp_cb, subflow_work);
+	struct sock *meta_sk = mpcb->meta_sk;
+	int iter = 0, retry = 0;
+	int i;
+
+next_subflow:
+	if (iter) {
+		release_sock(meta_sk);
+		mutex_unlock(&mpcb->mutex);
+
+		yield();
+	}
+	mutex_lock(&mpcb->mutex);
+	lock_sock_nested(meta_sk, SINGLE_DEPTH_NESTING);
+
+	iter++;
+
+	if (sock_flag(meta_sk, SOCK_DEAD))
+		goto exit;
+
+	if (sysctl_mptcp_ndiffports > iter &&
+	    sysctl_mptcp_ndiffports > mpcb->cnt_subflows) {
+		if (meta_sk->sk_family == AF_INET ||
+		    mptcp_v6_is_v4_mapped(meta_sk)) {
+			mptcp_init4_subsockets(meta_sk, &mpcb->locaddr4[0],
+					       &mpcb->remaddr4[0]);
+		}
+		goto next_subflow;
+	}
+	if (sysctl_mptcp_ndiffports > 1 &&
+	    sysctl_mptcp_ndiffports == mpcb->cnt_subflows)
+		goto exit;
+
+	mptcp_for_each_bit_set(mpcb->rem4_bits, i) {
+		struct mptcp_rem4 *rem;
+		u8 remaining_bits;
+
+		rem = &mpcb->remaddr4[i];
+		remaining_bits = ~(rem->bitfield) & mpcb->loc4_bits;
+
+		/* Are there still combinations to handle? */
+		if (remaining_bits) {
+			int i = mptcp_find_free_index(~remaining_bits);
+			/* If a route is not yet available then retry once */
+			if (mptcp_init4_subsockets(meta_sk, &mpcb->locaddr4[i],
+						   rem) == -ENETUNREACH)
+				retry = rem->retry_bitfield |=
+					(1 << mpcb->locaddr4[i].id);
+			goto next_subflow;
+		}
+	}
+
+	if (retry && !delayed_work_pending(&mpcb->subflow_retry_work)) {
+		sock_hold(meta_sk);
+		queue_delayed_work(mptcp_wq, &mpcb->subflow_retry_work,
+				   msecs_to_jiffies(MPTCP_SUBFLOW_RETRY_DELAY));
+	}
+
+exit:
+	release_sock(meta_sk);
+	mutex_unlock(&mpcb->mutex);
+	sock_put(meta_sk);
+}
+
+void mptcp_create_subflows(struct sock *meta_sk)
+{
+	struct mptcp_cb *mpcb = tcp_sk(meta_sk)->mpcb;
+
+	if ((mpcb->master_sk &&
+	     !tcp_sk(mpcb->master_sk)->mptcp->fully_established) ||
+	    mpcb->infinite_mapping_snd || mpcb->infinite_mapping_rcv ||
+	    mpcb->server_side || sock_flag(meta_sk, SOCK_DEAD))
+		return;
+
+	if (!work_pending(&mpcb->subflow_work)) {
+		sock_hold(meta_sk);
+		queue_work(mptcp_wq, &mpcb->subflow_work);
+	}
 }
 
 void mptcp_address_worker(struct work_struct *work)
@@ -337,6 +473,9 @@ int mptcp_pm_addr_event_handler(unsigned long event, void *ptr, int family)
 	int i;
 
 	if (!(event == NETDEV_UP || event == NETDEV_CHANGE))
+		return NOTIFY_DONE;
+
+	if (sysctl_mptcp_ndiffports > 1)
 		return NOTIFY_DONE;
 
 	/* Now we iterate over the mpcb's */
