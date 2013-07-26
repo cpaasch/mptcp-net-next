@@ -1502,9 +1502,12 @@ int tcp_v4_conn_request(struct sock *sk, struct sk_buff *skb)
 	mptcp_init_mp_opt(&mopt);
 	tcp_parse_options(skb, &tmp_opt, &mopt, 0, want_cookie ? NULL : &foc);
 
+#ifdef CONFIG_MPTCP
+	if (mopt.is_mp_join)
+		return mptcp_do_join_short(skb, &mopt, &tmp_opt, sock_net(sk));
 	if (mopt.drop_me)
 		goto drop;
-
+#endif
 	/* Never answer to SYNs send to broadcast or multicast */
 	if (skb_rtable(skb)->rt_flags & (RTCF_BROADCAST | RTCF_MULTICAST))
 		goto drop;
@@ -1537,6 +1540,7 @@ int tcp_v4_conn_request(struct sock *sk, struct sk_buff *skb)
 		if (!req)
 			goto drop;
 
+		mptcp_rsk(req)->mpcb = NULL;
 		mptcp_rsk(req)->dss_csum = mopt.dss_csum;
 		mptcp_rsk(req)->collide_tk.pprev = NULL;
 	} else
@@ -2051,6 +2055,25 @@ process:
 	if (sk && sk->sk_state == TCP_TIME_WAIT)
 		goto do_time_wait;
 
+#ifdef CONFIG_MPTCP
+	if (!sk && th->syn && !th->ack) {
+		int ret = mptcp_lookup_join(skb, NULL);
+
+		if (ret < 0) {
+			tcp_v4_send_reset(NULL, skb);
+			goto discard_it;
+		} else if (ret > 0) {
+			return 0;
+		}
+	}
+
+	/* Is there a pending request sock for this segment ? */
+	if ((!sk || sk->sk_state == TCP_LISTEN) && mptcp_check_req(skb, net)) {
+		if (sk)
+			sock_put(sk);
+		return 0;
+	}
+#endif
 	if (!sk)
 		goto no_tcp_socket;
 
@@ -2155,6 +2178,18 @@ do_time_wait:
 			sk = sk2;
 			goto process;
 		}
+#ifdef CONFIG_MPTCP
+		if (th->syn && !th->ack) {
+			int ret = mptcp_lookup_join(skb, inet_twsk(sk));
+
+			if (ret < 0) {
+				tcp_v4_send_reset(NULL, skb);
+				goto discard_it;
+			} else if (ret > 0) {
+				return 0;
+			}
+		}
+#endif
 		/* Fall through to ACK */
 	}
 	case TCP_TW_ACK:
