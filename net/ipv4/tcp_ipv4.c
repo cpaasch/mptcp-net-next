@@ -1512,8 +1512,6 @@ int tcp_v4_conn_request(struct sock *sk, struct sk_buff *skb)
 	if (mopt.drop_me)
 		goto drop;
 #endif
-
-tcp_flow:
 	/* Never answer to SYNs send to broadcast or multicast */
 	if (skb_rtable(skb)->rt_flags & (RTCF_BROADCAST | RTCF_MULTICAST))
 		goto drop;
