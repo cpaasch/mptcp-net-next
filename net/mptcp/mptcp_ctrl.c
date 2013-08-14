@@ -67,6 +67,8 @@ int sysctl_mptcp_debug __read_mostly;
 EXPORT_SYMBOL(sysctl_mptcp_debug);
 int sysctl_mptcp_syn_retries __read_mostly = 3;
 
+bool mptcp_init_failed __read_mostly;
+
 #ifdef CONFIG_SYSCTL
 static struct ctl_table mptcp_table[] = {
 	{
@@ -1473,6 +1475,10 @@ out:
 /* Returns 1 if we should enable MPTCP for that socket. */
 int mptcp_doit(struct sock *sk)
 {
+	/* Do not allow MPTCP enabling if the MPTCP initialization failed */
+	if (mptcp_init_failed)
+		return 0;
+
 	/* Socket may already be established (e.g., called from tcp_recvmsg) */
 	if (tcp_sk(sk)->mpc || tcp_sk(sk)->request_mptcp)
 		return 1;
@@ -1762,7 +1768,7 @@ void __init mptcp_init(void)
 					     0, SLAB_HWCACHE_ALIGN,
 					     NULL);
 	if (!mptcp_sock_cache)
-		goto out;
+		goto mptcp_sock_cache_failed;
 
 	mptcp_cb_cache = kmem_cache_create("mptcp_cb", sizeof(struct mptcp_cb),
 					   0, SLAB_DESTROY_BY_RCU|SLAB_HWCACHE_ALIGN,
@@ -1793,7 +1799,8 @@ void __init mptcp_init(void)
 
 	pr_info("MPTCP: Stable release v0.87.0");
 
-out:
+	mptcp_init_failed = false;
+
 	return;
 
 #ifdef CONFIG_SYSCTL
@@ -1808,4 +1815,6 @@ mptcp_tw_cache_failed:
 	kmem_cache_destroy(mptcp_cb_cache);
 mptcp_cb_cache_failed:
 	kmem_cache_destroy(mptcp_sock_cache);
+mptcp_sock_cache_failed:
+	mptcp_init_failed = true;
 }
