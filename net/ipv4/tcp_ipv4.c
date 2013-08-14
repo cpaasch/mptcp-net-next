@@ -1503,11 +1503,17 @@ int tcp_v4_conn_request(struct sock *sk, struct sk_buff *skb)
 	tcp_parse_options(skb, &tmp_opt, &mopt, 0, want_cookie ? NULL : &foc);
 
 #ifdef CONFIG_MPTCP
+	/* MPTCP structures not initialized, so clear MPTCP fields */
+	if  (mptcp_init_failed)
+		mptcp_init_mp_opt(&mopt);
+
 	if (mopt.is_mp_join)
 		return mptcp_do_join_short(skb, &mopt, &tmp_opt, sock_net(sk));
 	if (mopt.drop_me)
 		goto drop;
 #endif
+
+tcp_flow:
 	/* Never answer to SYNs send to broadcast or multicast */
 	if (skb_rtable(skb)->rt_flags & (RTCF_BROADCAST | RTCF_MULTICAST))
 		goto drop;
