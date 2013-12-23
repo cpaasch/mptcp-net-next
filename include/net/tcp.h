@@ -388,6 +388,8 @@ void tcp_cwnd_validate(struct sock *sk);
 void tcp_event_new_data_sent(struct sock *sk, const struct sk_buff *skb);
 int tcp_transmit_skb(struct sock *sk, struct sk_buff *skb, int clone_it,
 		     gfp_t gfp_mask);
+void tcp_minshall_update(struct tcp_sock *tp, unsigned int mss_now,
+			 const struct sk_buff *skb);
 unsigned int tcp_mss_split_point(const struct sock *sk, const struct sk_buff *skb,
 				 unsigned int mss_now, unsigned int max_segs,
 				 int nonagle);
