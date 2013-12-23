@@ -1478,7 +1478,7 @@ static bool tcp_minshall_check(const struct tcp_sock *tp)
  * But we can avoid doing the divide again given we already have
  *  skb_pcount = skb->len / mss_now
  */
-static void tcp_minshall_update(struct tcp_sock *tp, unsigned int mss_now,
+void tcp_minshall_update(struct tcp_sock *tp, unsigned int mss_now,
 				const struct sk_buff *skb)
 {
 	if (skb->len < tcp_skb_pcount(skb) * mss_now)
