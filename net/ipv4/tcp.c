@@ -2191,19 +2191,32 @@ bool tcp_check_oom(struct sock *sk, int shift)
 
 void tcp_close(struct sock *sk, long timeout)
 {
+	struct tcp_sock *tp = tcp_sk(sk);
+	struct sock *sk_it, *tmp_sk;
+	struct mptcp_cb *mpcb = tp->mpcb;
 	struct sk_buff *skb;
 	int data_was_unread = 0;
 	int state;
+	bool is_meta = is_meta_sk(sk);
 
-	if (is_meta_sk(sk)) {
-		mptcp_close(sk, timeout);
-		return;
+	if (is_meta) {
+		mptcp_debug("%s: Close of meta_sk with tok %#x\n",
+			__func__, mpcb->mptcp_loc_token);
+
+		mutex_lock(&mpcb->mutex);
 	}
 
 	lock_sock(sk);
+
+	if (is_meta && tp->inside_tk_table) {
+		/* Detach the mpcb from the token hashtable */
+		mptcp_hash_remove_bh(tp);
+		reqsk_queue_destroy(&inet_csk(sk)->icsk_accept_queue);
+	}
+
 	sk->sk_shutdown = SHUTDOWN_MASK;
 
-	if (sk->sk_state == TCP_LISTEN) {
+	if (!is_meta && sk->sk_state == TCP_LISTEN) {
 		tcp_set_state(sk, TCP_CLOSE);
 
 		/* Special case. */
@@ -2226,8 +2239,13 @@ void tcp_close(struct sock *sk, long timeout)
 	sk_mem_reclaim(sk);
 
 	/* If socket has been already reset (e.g. in tcp_reset()) - kill it. */
-	if (sk->sk_state == TCP_CLOSE)
+	if (sk->sk_state == TCP_CLOSE) {
+		if (is_meta)
+			mptcp_for_each_sk_safe(mpcb, sk_it, tmp_sk)
+				mptcp_sub_close(sk_it, 0);
+
 		goto adjudge_to_death;
+	}
 
 	/* As outlined in RFC 2525, section 2.17, we send a RST here because
 	 * data was lost. To witness the awful effects of the old behavior of
@@ -2236,7 +2254,7 @@ void tcp_close(struct sock *sk, long timeout)
 	 * advertise a zero window, then kill -9 the FTP client, wheee...
 	 * Note: timeout is always zero in such a case.
 	 */
-	if (unlikely(tcp_sk(sk)->repair)) {
+	if (!is_meta && unlikely(tcp_sk(sk)->repair)) {
 		sk->sk_prot->disconnect(sk, 0);
 	} else if (data_was_unread) {
 		/* Unread data was tossed, zap the connection. */
@@ -2277,7 +2295,23 @@ void tcp_close(struct sock *sk, long timeout)
 		 * probably need API support or TCP_CORK SYN-ACK until
 		 * data is written and socket is closed.)
 		 */
-		tcp_send_fin(sk);
+		is_meta ? mptcp_send_fin(sk) : tcp_send_fin(sk);
+	} else if (is_meta && tp->snd_una == tp->write_seq) {
+		/* The DATA_FIN has been sent and acknowledged
+		 * (e.g., by sk_shutdown). Close all the other subflows
+		 */
+		mptcp_for_each_sk_safe(mpcb, sk_it, tmp_sk) {
+			unsigned long delay = 0;
+			/* If we are the passive closer, don't trigger
+			 * subflow-fin until the subflow has been finned
+			 * by the peer. - thus we add a delay
+			 */
+			if (mpcb->passive_close &&
+				sk_it->sk_state == TCP_ESTABLISHED)
+					delay = inet_csk(sk_it)->icsk_rto << 3;
+
+			mptcp_sub_close(sk_it, delay);
+		}
 	}
 
 	sk_stream_wait_close(sk, timeout);
@@ -2287,9 +2321,24 @@ adjudge_to_death:
 	sock_hold(sk);
 	sock_orphan(sk);
 
-	/* It is the last release_sock in its life. It will remove backlog. */
-	release_sock(sk);
+	if (is_meta) {
+		/* Master socket will be freed after tcp_close, so we have to
+		 * prevent access from the subflows.
+		 */
+		mptcp_for_each_sk(mpcb, sk_it) {
+			/* Similar to sock_orphan, but we don't set it DEAD,
+			 * because the callbacks are still set and must be
+			 * called.
+			 */
+			write_lock_bh(&sk_it->sk_callback_lock);
+			sk_set_socket(sk_it, NULL);
+			sk_it->sk_wq = NULL;
+			write_unlock_bh(&sk_it->sk_callback_lock);
+		}
+	}
 
+	/* It is the last release_sock in its life. It will remove backlog.*/
+	release_sock(sk);
 
 	/* Now socket is owned by kernel and we acquire BH lock
 	   to finish close. No need to check for user refs.
@@ -2319,7 +2368,6 @@ adjudge_to_death:
 	 */
 
 	if (sk->sk_state == TCP_FIN_WAIT2) {
-		struct tcp_sock *tp = tcp_sk(sk);
 		if (tp->linger2 < 0) {
 			tcp_set_state(sk, TCP_CLOSE);
 			tcp_send_active_reset(sk, GFP_ATOMIC);
@@ -2339,22 +2387,34 @@ adjudge_to_death:
 	}
 	if (sk->sk_state != TCP_CLOSE) {
 		sk_mem_reclaim(sk);
-		if (tcp_check_oom(sk, 0)) {
-			tcp_set_state(sk, TCP_CLOSE);
-			tcp_send_active_reset(sk, GFP_ATOMIC);
-			NET_INC_STATS_BH(sock_net(sk),
-					LINUX_MIB_TCPABORTONMEMORY);
-		}
+
+		/* MPTCP master sock case */
+		if (is_meta) {
+			if (tcp_too_many_orphans(sk, 0) && net_ratelimit())
+				pr_info("MPTCP: too many orphaned sockets\n");
+			else
+				goto check_close_state;
+		} else if (!tcp_check_oom(sk, 0))
+			goto check_close_state;
+
+		tcp_set_state(sk, TCP_CLOSE);
+		tcp_send_active_reset(sk, GFP_ATOMIC);
+		NET_INC_STATS_BH(sock_net(sk),
+			LINUX_MIB_TCPABORTONMEMORY);
 	}
 
+check_close_state:
 	if (sk->sk_state == TCP_CLOSE) {
-		struct request_sock *req = tcp_sk(sk)->fastopen_rsk;
-		/* We could get here with a non-NULL req if the socket is
-		 * aborted (e.g., closed with unread data) before 3WHS
-		 * finishes.
-		 */
-		if (req != NULL)
-			reqsk_fastopen_remove(sk, req, false);
+		if (!is_meta) {
+			struct request_sock *req = tcp_sk(sk)->fastopen_rsk;
+			/* We could get here with a non-NULL req if the socket
+			 * is aborted (e.g., closed with unread data) before
+			 * 3 WHS finishes.
+			 */
+			if (req != NULL)
+				reqsk_fastopen_remove(sk, req, false);
+		}
+
 		inet_csk_destroy_sock(sk);
 	}
 	/* Otherwise, socket is reprieved until protocol close. */
@@ -2362,6 +2422,8 @@ adjudge_to_death:
 out:
 	bh_unlock_sock(sk);
 	local_bh_enable();
+	if (is_meta)
+		mutex_unlock(&mpcb->mutex);
 	sock_put(sk);
 }
 EXPORT_SYMBOL(tcp_close);
