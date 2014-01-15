@@ -2506,7 +2506,7 @@ int __tcp_retransmit_skb(struct sock *sk, struct sk_buff *skb)
 				      MPTCP_SUB_LEN_ACK_ALIGN +
 				      MPTCP_SUB_LEN_SEQ_ALIGN);
 
-		nskb = __pskb_copy(skb, MAX_TCP_HEADER, GFP_ATOMIC);
+		nskb = __pskb_copy(skb, MAX_TCP_HEADER, GFP_ATOMIC, false);
 
 		if (mptcp_is_data_seq(skb)) {
 			skb_pull(skb, MPTCP_SUB_LEN_DSS_ALIGN +

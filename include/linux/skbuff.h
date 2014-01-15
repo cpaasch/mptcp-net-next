@@ -356,7 +356,7 @@ typedef unsigned int sk_buff_data_t;
 typedef unsigned char *sk_buff_data_t;
 #endif
 
-/** 
+/**
  *	struct sk_buff - socket buffer
  *	@next: Next buffer in list
  *	@prev: Previous buffer in list
@@ -577,7 +577,7 @@ static inline bool skb_pfmemalloc(const struct sk_buff *skb)
  */
 static inline struct dst_entry *skb_dst(const struct sk_buff *skb)
 {
-	/* If refdst was not refcounted, check we still are in a 
+	/* If refdst was not refcounted, check we still are in a
 	 * rcu_read_lock section
 	 */
 	WARN_ON((skb->_skb_refdst & SKB_DST_NOREF) &&
@@ -684,7 +684,8 @@ struct sk_buff *skb_morph(struct sk_buff *dst, struct sk_buff *src);
 int skb_copy_ubufs(struct sk_buff *skb, gfp_t gfp_mask);
 struct sk_buff *skb_clone(struct sk_buff *skb, gfp_t priority);
 struct sk_buff *skb_copy(const struct sk_buff *skb, gfp_t priority);
-struct sk_buff *__pskb_copy(struct sk_buff *skb, int headroom, gfp_t gfp_mask);
+struct sk_buff *__pskb_copy(struct sk_buff *skb, int headroom, gfp_t gfp_mask,
+				bool mptcp_flag);
 
 int pskb_expand_head(struct sk_buff *skb, int nhead, int ntail, gfp_t gfp_mask);
 struct sk_buff *skb_realloc_headroom(struct sk_buff *skb,
@@ -2163,7 +2164,7 @@ static inline dma_addr_t skb_frag_dma_map(struct device *dev,
 static inline struct sk_buff *pskb_copy(struct sk_buff *skb,
 					gfp_t gfp_mask)
 {
-	return __pskb_copy(skb, skb_headroom(skb), gfp_mask);
+	return __pskb_copy(skb, skb_headroom(skb), gfp_mask, false);
 }
 
 /**
@@ -2236,7 +2237,7 @@ static inline int skb_cow_head(struct sk_buff *skb, unsigned int headroom)
  *	is untouched. Otherwise it is extended. Returns zero on
  *	success. The skb is freed on error.
  */
- 
+
 static inline int skb_padto(struct sk_buff *skb, unsigned int len)
 {
 	unsigned int size = skb->len;
