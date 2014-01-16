@@ -1048,20 +1048,20 @@ retrans:
 
 	/* Segment not yet injected into this path? Take it!!! */
 	if (!(TCP_SKB_CB(skb_head)->path_mask & mptcp_pi_to_flag(tp->mptcp->path_index))) {
-		int do_retrans = 0;
+		bool do_retrans = false;
 		mptcp_for_each_tp(tp->mpcb, tp_it) {
 			if (tp_it != tp &&
 			    TCP_SKB_CB(skb_head)->path_mask & mptcp_pi_to_flag(tp_it->mptcp->path_index)) {
 				if (tp_it->snd_cwnd <= 4) {
-					do_retrans = 1;
+					do_retrans = true;
 					break;
 				}
 
 				if (4 * tp->srtt >= tp_it->srtt) {
-					do_retrans = 0;
+					do_retrans = false;
 					break;
 				} else {
-					do_retrans = 1;
+					do_retrans = true;
 				}
 			}
 		}
@@ -1079,7 +1079,7 @@ int mptcp_write_xmit(struct sock *meta_sk, unsigned int mss_now, int nonagle,
 	struct sock *subsk;
 	struct mptcp_cb *mpcb = meta_tp->mpcb;
 	struct sk_buff *skb;
-	unsigned int tso_segs, sent_pkts;
+	unsigned int tso_segs, old_factor, sent_pkts;
 	int cwnd_quota;
 	int result;
 	int reinject = 0;
@@ -1135,19 +1135,36 @@ retry:
 		if (skb_unclone(skb, GFP_ATOMIC))
 			break;
 
+		old_factor = tcp_skb_pcount(skb);
 		tcp_set_skb_tso_segs(meta_sk, skb, mss_now);
 		tso_segs = tcp_skb_pcount(skb);
-		BUG_ON(!tso_segs);
+
+		if (reinject == -1) {
+			/* The packet has already once been sent, so if we
+			 * change the pcount here we have to adjust packets_out
+			 * in the meta-sk
+			 */
+			int diff = old_factor - tso_segs;
+
+			if (diff)
+				tcp_adjust_pcount(meta_sk, skb, diff);
+		}
 
 		cwnd_quota = tcp_cwnd_test(subtp, skb);
 		if (!cwnd_quota) {
-			/* May happen, if at the first selection we circumvented
-			 * the test due to a DATA_FIN (and got rejected at
-			 * tcp_snd_wnd_test), but the reinjected segment is not
-			 * a DATA_FIN.
+			/* May happen due to two cases:
+			 *
+			 * - if at the first selection we circumvented
+			 *   the test due to a DATA_FIN (and got rejected at
+			 *   tcp_snd_wnd_test), but the reinjected segment is not
+			 *   a DATA_FIN.
+			 * - if we take a DATA_FIN with data, but
+			 *   tcp_set_skb_tso_segs() increases the number of
+			 *   tso_segs to something > 1. Then, cwnd_test might
+			 *   reject it.
 			 */
-			BUG_ON(reinject != -1);
-			break;
+			mpcb->noneligible |= mptcp_pi_to_flag(subtp->mptcp->path_index);
+			continue;
 		}
 
 		if (!reinject && unlikely(!tcp_snd_wnd_test(meta_tp, skb, mss_now))) {
@@ -2018,7 +2035,7 @@ void mptcp_retransmit_timer(struct sock *meta_sk)
 		 */
 		struct inet_sock *meta_inet = inet_sk(meta_sk);
 		if (meta_sk->sk_family == AF_INET) {
-			LIMIT_NETDEBUG(KERN_DEBUG "TCP: Peer %pI4:%u/%u unexpectedly shrunk window %u:%u (repaired)\n",
+			LIMIT_NETDEBUG(KERN_DEBUG "MPTCP: Peer %pI4:%u/%u unexpectedly shrunk window %u:%u (repaired)\n",
 				       &meta_inet->inet_daddr,
 				       ntohs(meta_inet->inet_dport),
 				       meta_inet->inet_num, meta_tp->snd_una,
@@ -2026,7 +2043,7 @@ void mptcp_retransmit_timer(struct sock *meta_sk)
 		}
 #if IS_ENABLED(CONFIG_IPV6)
 		else if (meta_sk->sk_family == AF_INET6) {
-			LIMIT_NETDEBUG(KERN_DEBUG "TCP: Peer %pI6:%u/%u unexpectedly shrunk window %u:%u (repaired)\n",
+			LIMIT_NETDEBUG(KERN_DEBUG "MPTCP: Peer %pI6:%u/%u unexpectedly shrunk window %u:%u (repaired)\n",
 				       &meta_sk->sk_v6_daddr,
 				       ntohs(meta_inet->inet_dport),
 				       meta_inet->inet_num, meta_tp->snd_una,
@@ -2150,7 +2167,7 @@ unsigned int mptcp_current_mss(struct sock *meta_sk)
 			continue;
 
 		this_mss = tcp_current_mss(sk);
-		if (!mss || this_mss < mss)
+		if (this_mss > mss)
 			mss = this_mss;
 	}
 
@@ -2172,7 +2189,7 @@ int mptcp_select_size(const struct sock *meta_sk, bool sg)
 			continue;
 
 		this_mss = tcp_sk(sk)->mss_cache;
-		if (!mss || this_mss < mss)
+		if (this_mss > mss)
 			mss = this_mss;
 	}
 
@@ -2230,7 +2247,7 @@ unsigned int mptcp_xmit_size_goal(struct sock *meta_sk, u32 mss_now,
 				continue;
 
 			this_size_goal = tcp_xmit_size_goal(sk, mss_now, 1);
-			if (!xmit_size_goal || this_size_goal < xmit_size_goal)
+			if (this_size_goal > xmit_size_goal)
 				xmit_size_goal = this_size_goal;
 		}
 	}
