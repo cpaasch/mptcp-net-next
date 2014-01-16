@@ -464,7 +464,7 @@ static int __inet_insert_ifa(struct in_ifaddr *ifa, struct nlmsghdr *nlh,
 	}
 
 	if (!(ifa->ifa_flags & IFA_F_SECONDARY)) {
-		net_srandom(ifa->ifa_local);
+		prandom_seed((__force u32) ifa->ifa_local);
 		ifap = last_primary;
 	}
 
@@ -1385,6 +1385,8 @@ static int inetdev_event(struct notifier_block *this, unsigned long event,
 				memcpy(ifa->ifa_label, dev->name, IFNAMSIZ);
 				set_ifa_lifetime(ifa, INFINITY_LIFE_TIME,
 						 INFINITY_LIFE_TIME);
+				ipv4_devconf_setall(in_dev);
+				neigh_parms_data_state_setall(in_dev->arp_parms);
 				inet_insert_ifa(ifa);
 			}
 		}

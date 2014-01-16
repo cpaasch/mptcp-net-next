@@ -185,25 +185,6 @@ struct tipc_bearer *tipc_bearer_find(const char *name)
 }
 
 /**
- * tipc_bearer_find_interface - locates bearer object with matching interface name
- */
-struct tipc_bearer *tipc_bearer_find_interface(const char *if_name)
-{
-	struct tipc_bearer *b_ptr;
-	char *b_if_name;
-	u32 i;
-
-	for (i = 0, b_ptr = tipc_bearers; i < MAX_BEARERS; i++, b_ptr++) {
-		if (!b_ptr->active)
-			continue;
-		b_if_name = strchr(b_ptr->name, ':') + 1;
-		if (!strcmp(b_if_name, if_name))
-			return b_ptr;
-	}
-	return NULL;
-}
-
-/**
  * tipc_bearer_get_names - record names of bearers in buffer
  */
 struct sk_buff *tipc_bearer_get_names(void)
@@ -492,7 +473,7 @@ void tipc_disable_l2_media(struct tipc_bearer *b)
 /**
  * tipc_l2_send_msg - send a TIPC packet out over an Ethernet interface
  * @buf: the packet to be sent
- * @b_ptr: the bearer throught which the packet is to be sent
+ * @b_ptr: the bearer through which the packet is to be sent
  * @dest: peer destination address
  */
 int tipc_l2_send_msg(struct sk_buff *buf, struct tipc_bearer *b,
@@ -560,7 +541,7 @@ static int tipc_l2_rcv_msg(struct sk_buff *buf, struct net_device *dev,
 	if (likely(b_ptr)) {
 		if (likely(buf->pkt_type <= PACKET_BROADCAST)) {
 			buf->next = NULL;
-			tipc_recv_msg(buf, b_ptr);
+			tipc_rcv(buf, b_ptr);
 			rcu_read_unlock();
 			return NET_RX_SUCCESS;
 		}

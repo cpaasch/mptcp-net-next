@@ -1743,7 +1743,7 @@ static int sctp_sendmsg(struct kiocb *iocb, struct sock *sk,
 		 * either the default or the user specified stream counts.
 		 */
 		if (sinfo) {
-			if (!sinit || (sinit && !sinit->sinit_num_ostreams)) {
+			if (!sinit || !sinit->sinit_num_ostreams) {
 				/* Check against the defaults. */
 				if (sinfo->sinfo_stream >=
 				    sp->initmsg.sinit_num_ostreams) {
@@ -2527,6 +2527,16 @@ static int sctp_setsockopt_peer_addr_params(struct sock *sk,
 	return 0;
 }
 
+static inline __u32 sctp_spp_sackdelay_enable(__u32 param_flags)
+{
+	return (param_flags & ~SPP_SACKDELAY) | SPP_SACKDELAY_ENABLE;
+}
+
+static inline __u32 sctp_spp_sackdelay_disable(__u32 param_flags)
+{
+	return (param_flags & ~SPP_SACKDELAY) | SPP_SACKDELAY_DISABLE;
+}
+
 /*
  * 7.1.23.  Get or set delayed ack timer (SCTP_DELAYED_SACK)
  *
@@ -2578,8 +2588,11 @@ static int sctp_setsockopt_delayed_ack(struct sock *sk,
 		if (params.sack_delay == 0 && params.sack_freq == 0)
 			return 0;
 	} else if (optlen == sizeof(struct sctp_assoc_value)) {
-		pr_warn("Use of struct sctp_assoc_value in delayed_ack socket option deprecated\n");
-		pr_warn("Use struct sctp_sack_info instead\n");
+		pr_warn_ratelimited(DEPRECATED
+				    "%s (pid %d) "
+				    "Use of struct sctp_assoc_value in delayed_ack socket option.\n"
+				    "Use struct sctp_sack_info instead\n",
+				    current->comm, task_pid_nr(current));
 		if (copy_from_user(&params, optval, optlen))
 			return -EFAULT;
 
@@ -2607,37 +2620,31 @@ static int sctp_setsockopt_delayed_ack(struct sock *sk,
 			asoc->sackdelay =
 				msecs_to_jiffies(params.sack_delay);
 			asoc->param_flags =
-				(asoc->param_flags & ~SPP_SACKDELAY) |
-				SPP_SACKDELAY_ENABLE;
+				sctp_spp_sackdelay_enable(asoc->param_flags);
 		} else {
 			sp->sackdelay = params.sack_delay;
 			sp->param_flags =
-				(sp->param_flags & ~SPP_SACKDELAY) |
-				SPP_SACKDELAY_ENABLE;
+				sctp_spp_sackdelay_enable(sp->param_flags);
 		}
 	}
 
 	if (params.sack_freq == 1) {
 		if (asoc) {
 			asoc->param_flags =
-				(asoc->param_flags & ~SPP_SACKDELAY) |
-				SPP_SACKDELAY_DISABLE;
+				sctp_spp_sackdelay_disable(asoc->param_flags);
 		} else {
 			sp->param_flags =
-				(sp->param_flags & ~SPP_SACKDELAY) |
-				SPP_SACKDELAY_DISABLE;
+				sctp_spp_sackdelay_disable(sp->param_flags);
 		}
 	} else if (params.sack_freq > 1) {
 		if (asoc) {
 			asoc->sackfreq = params.sack_freq;
 			asoc->param_flags =
-				(asoc->param_flags & ~SPP_SACKDELAY) |
-				SPP_SACKDELAY_ENABLE;
+				sctp_spp_sackdelay_enable(asoc->param_flags);
 		} else {
 			sp->sackfreq = params.sack_freq;
 			sp->param_flags =
-				(sp->param_flags & ~SPP_SACKDELAY) |
-				SPP_SACKDELAY_ENABLE;
+				sctp_spp_sackdelay_enable(sp->param_flags);
 		}
 	}
 
@@ -2649,18 +2656,15 @@ static int sctp_setsockopt_delayed_ack(struct sock *sk,
 				trans->sackdelay =
 					msecs_to_jiffies(params.sack_delay);
 				trans->param_flags =
-					(trans->param_flags & ~SPP_SACKDELAY) |
-					SPP_SACKDELAY_ENABLE;
+					sctp_spp_sackdelay_enable(trans->param_flags);
 			}
 			if (params.sack_freq == 1) {
 				trans->param_flags =
-					(trans->param_flags & ~SPP_SACKDELAY) |
-					SPP_SACKDELAY_DISABLE;
+					sctp_spp_sackdelay_disable(trans->param_flags);
 			} else if (params.sack_freq > 1) {
 				trans->sackfreq = params.sack_freq;
 				trans->param_flags =
-					(trans->param_flags & ~SPP_SACKDELAY) |
-					SPP_SACKDELAY_ENABLE;
+					sctp_spp_sackdelay_enable(trans->param_flags);
 			}
 		}
 	}
@@ -2994,8 +2998,11 @@ static int sctp_setsockopt_maxseg(struct sock *sk, char __user *optval, unsigned
 	int val;
 
 	if (optlen == sizeof(int)) {
-		pr_warn("Use of int in maxseg socket option deprecated\n");
-		pr_warn("Use struct sctp_assoc_value instead\n");
+		pr_warn_ratelimited(DEPRECATED
+				    "%s (pid %d) "
+				    "Use of int in maxseg socket option.\n"
+				    "Use struct sctp_assoc_value instead\n",
+				    current->comm, task_pid_nr(current));
 		if (copy_from_user(&val, optval, optlen))
 			return -EFAULT;
 		params.assoc_id = 0;
@@ -3252,8 +3259,11 @@ static int sctp_setsockopt_maxburst(struct sock *sk,
 	int assoc_id = 0;
 
 	if (optlen == sizeof(int)) {
-		pr_warn("Use of int in max_burst socket option deprecated\n");
-		pr_warn("Use struct sctp_assoc_value instead\n");
+		pr_warn_ratelimited(DEPRECATED
+				    "%s (pid %d) "
+				    "Use of int in max_burst socket option deprecated.\n"
+				    "Use struct sctp_assoc_value instead\n",
+				    current->comm, task_pid_nr(current));
 		if (copy_from_user(&val, optval, optlen))
 			return -EFAULT;
 	} else if (optlen == sizeof(struct sctp_assoc_value)) {
@@ -4573,8 +4583,11 @@ static int sctp_getsockopt_delayed_ack(struct sock *sk, int len,
 		if (copy_from_user(&params, optval, len))
 			return -EFAULT;
 	} else if (len == sizeof(struct sctp_assoc_value)) {
-		pr_warn("Use of struct sctp_assoc_value in delayed_ack socket option deprecated\n");
-		pr_warn("Use struct sctp_sack_info instead\n");
+		pr_warn_ratelimited(DEPRECATED
+				    "%s (pid %d) "
+				    "Use of struct sctp_assoc_value in delayed_ack socket option.\n"
+				    "Use struct sctp_sack_info instead\n",
+				    current->comm, task_pid_nr(current));
 		if (copy_from_user(&params, optval, len))
 			return -EFAULT;
 	} else
@@ -5218,8 +5231,11 @@ static int sctp_getsockopt_maxseg(struct sock *sk, int len,
 	struct sctp_association *asoc;
 
 	if (len == sizeof(int)) {
-		pr_warn("Use of int in maxseg socket option deprecated\n");
-		pr_warn("Use struct sctp_assoc_value instead\n");
+		pr_warn_ratelimited(DEPRECATED
+				    "%s (pid %d) "
+				    "Use of int in maxseg socket option.\n"
+				    "Use struct sctp_assoc_value instead\n",
+				    current->comm, task_pid_nr(current));
 		params.assoc_id = 0;
 	} else if (len >= sizeof(struct sctp_assoc_value)) {
 		len = sizeof(struct sctp_assoc_value);
@@ -5310,8 +5326,11 @@ static int sctp_getsockopt_maxburst(struct sock *sk, int len,
 	struct sctp_association *asoc;
 
 	if (len == sizeof(int)) {
-		pr_warn("Use of int in max_burst socket option deprecated\n");
-		pr_warn("Use struct sctp_assoc_value instead\n");
+		pr_warn_ratelimited(DEPRECATED
+				    "%s (pid %d) "
+				    "Use of int in max_burst socket option.\n"
+				    "Use struct sctp_assoc_value instead\n",
+				    current->comm, task_pid_nr(current));
 		params.assoc_id = 0;
 	} else if (len >= sizeof(struct sctp_assoc_value)) {
 		len = sizeof(struct sctp_assoc_value);
@@ -5908,7 +5927,7 @@ static long sctp_get_port_local(struct sock *sk, union sctp_addr *addr)
 
 		inet_get_local_port_range(sock_net(sk), &low, &high);
 		remaining = (high - low) + 1;
-		rover = net_random() % remaining + low;
+		rover = prandom_u32() % remaining + low;
 
 		do {
 			rover++;

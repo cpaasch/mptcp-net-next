@@ -29,7 +29,6 @@
 
 
 #define IPT_TAB_MASK     15
-static u32 ipt_idx_gen;
 static struct tcf_hashinfo ipt_hash_info;
 
 static int ipt_init_target(struct xt_entry_target *t, char *table, unsigned int hook)
@@ -129,15 +128,17 @@ static int tcf_ipt_init(struct net *net, struct nlattr *nla, struct nlattr *est,
 	pc = tcf_hash_check(index, a, bind, &ipt_hash_info);
 	if (!pc) {
 		pc = tcf_hash_create(index, est, a, sizeof(*ipt), bind,
-				     &ipt_idx_gen, &ipt_hash_info);
+				     &ipt_hash_info);
 		if (IS_ERR(pc))
 			return PTR_ERR(pc);
 		ret = ACT_P_CREATED;
 	} else {
-		if (!ovr) {
-			tcf_ipt_release(to_ipt(pc), bind);
+		if (bind)/* dont override defaults */
+			return 0;
+		tcf_ipt_release(to_ipt(pc), bind);
+
+		if (!ovr)
 			return -EEXIST;
-		}
 	}
 	ipt = to_ipt(pc);
 

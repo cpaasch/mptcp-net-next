@@ -117,7 +117,7 @@ static void neigh_cleanup_and_release(struct neighbour *neigh)
 
 unsigned long neigh_rand_reach_time(unsigned long base)
 {
-	return base ? (net_random() % base) + (base >> 1) : 0;
+	return base ? (prandom_u32() % base) + (base >> 1) : 0;
 }
 EXPORT_SYMBOL(neigh_rand_reach_time);
 
@@ -1298,7 +1298,7 @@ int neigh_compat_output(struct neighbour *neigh, struct sk_buff *skb)
 
 	if (dev_hard_header(skb, dev, ntohs(skb->protocol), NULL, NULL,
 			    skb->len) < 0 &&
-	    dev->header_ops->rebuild(skb))
+	    dev_rebuild_header(skb))
 		return 0;
 
 	return dev_queue_xmit(skb);
@@ -1415,7 +1415,8 @@ void pneigh_enqueue(struct neigh_table *tbl, struct neigh_parms *p,
 		    struct sk_buff *skb)
 {
 	unsigned long now = jiffies;
-	unsigned long sched_next = now + (net_random() %
+
+	unsigned long sched_next = now + (prandom_u32() %
 					  NEIGH_VAR(p, PROXY_DELAY));
 
 	if (tbl->proxy_queue.qlen > NEIGH_VAR(p, PROXY_QLEN)) {
@@ -2086,13 +2087,16 @@ static int neightbl_set(struct sk_buff *skb, struct nlmsghdr *nlh)
 					      nla_get_msecs(tbp[i]));
 				break;
 			case NDTPA_ANYCAST_DELAY:
-				NEIGH_VAR_SET(p, ANYCAST_DELAY, nla_get_msecs(tbp[i]));
+				NEIGH_VAR_SET(p, ANYCAST_DELAY,
+					      nla_get_msecs(tbp[i]));
 				break;
 			case NDTPA_PROXY_DELAY:
-				NEIGH_VAR_SET(p, PROXY_DELAY, nla_get_msecs(tbp[i]));
+				NEIGH_VAR_SET(p, PROXY_DELAY,
+					      nla_get_msecs(tbp[i]));
 				break;
 			case NDTPA_LOCKTIME:
-				NEIGH_VAR_SET(p, LOCKTIME, nla_get_msecs(tbp[i]));
+				NEIGH_VAR_SET(p, LOCKTIME,
+					      nla_get_msecs(tbp[i]));
 				break;
 			}
 		}

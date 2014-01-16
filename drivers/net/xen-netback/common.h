@@ -101,6 +101,13 @@ struct xenvif_rx_meta {
 
 #define MAX_PENDING_REQS 256
 
+/* It's possible for an skb to have a maximal number of frags
+ * but still be less than MAX_BUFFER_OFFSET in size. Thus the
+ * worst-case number of copy operations is MAX_SKB_FRAGS per
+ * ring slot.
+ */
+#define MAX_GRANT_COPY_OPS (MAX_SKB_FRAGS * XEN_NETIF_RX_RING_SIZE)
+
 struct xenvif {
 	/* Unique identifier for this interface. */
 	domid_t          domid;
@@ -136,18 +143,19 @@ struct xenvif {
 	char rx_irq_name[IFNAMSIZ+4]; /* DEVNAME-rx */
 	struct xen_netif_rx_back_ring rx;
 	struct sk_buff_head rx_queue;
+	bool rx_queue_stopped;
 	/* Set when the RX interrupt is triggered by the frontend.
 	 * The worker thread may need to wake the queue.
 	 */
 	bool rx_event;
 
-	/* Given MAX_BUFFER_OFFSET of 4096 the worst case is that each
-	 * head/fragment page uses 2 copy operations because it
-	 * straddles two buffers in the frontend.
-	 */
-	struct gnttab_copy grant_copy_op[2*XEN_NETIF_RX_RING_SIZE];
-	struct xenvif_rx_meta meta[2*XEN_NETIF_RX_RING_SIZE];
+	/* This array is allocated seperately as it is large */
+	struct gnttab_copy *grant_copy_op;
 
+	/* We create one meta structure per ring request we consume, so
+	 * the maximum number is the same as the ring size.
+	 */
+	struct xenvif_rx_meta meta[XEN_NETIF_RX_RING_SIZE];
 
 	u8               fe_dev_addr[6];
 

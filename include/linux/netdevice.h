@@ -769,7 +769,8 @@ struct netdev_phys_port_id {
  *        (can also return NETDEV_TX_LOCKED iff NETIF_F_LLTX)
  *	Required can not be NULL.
  *
- * u16 (*ndo_select_queue)(struct net_device *dev, struct sk_buff *skb);
+ * u16 (*ndo_select_queue)(struct net_device *dev, struct sk_buff *skb,
+ *                         void *accel_priv);
  *	Called to decide which queue to when device supports multiple
  *	transmit queues.
  *
@@ -990,7 +991,8 @@ struct net_device_ops {
 	netdev_tx_t		(*ndo_start_xmit) (struct sk_buff *skb,
 						   struct net_device *dev);
 	u16			(*ndo_select_queue)(struct net_device *dev,
-						    struct sk_buff *skb);
+						    struct sk_buff *skb,
+						    void *accel_priv);
 	void			(*ndo_change_rx_flags)(struct net_device *dev,
 						       int flags);
 	void			(*ndo_set_rx_mode)(struct net_device *dev);
@@ -1409,7 +1411,7 @@ struct net_device {
 	union {
 		void				*ml_priv;
 		struct pcpu_lstats __percpu	*lstats; /* loopback stats */
-		struct pcpu_tstats __percpu	*tstats; /* tunnel stats */
+		struct pcpu_sw_netstats __percpu	*tstats;
 		struct pcpu_dstats __percpu	*dstats; /* dummy stats */
 		struct pcpu_vstats __percpu	*vstats; /* veth stats */
 	};
@@ -1444,7 +1446,7 @@ struct net_device {
 	/* max exchange id for FCoE LRO by ddp */
 	unsigned int		fcoe_ddp_xid;
 #endif
-#if IS_ENABLED(CONFIG_NETPRIO_CGROUP)
+#if IS_ENABLED(CONFIG_CGROUP_NET_PRIO)
 	struct netprio_map __rcu *priomap;
 #endif
 	/* phy device may attach itself for hardware timestamping */
@@ -1532,7 +1534,8 @@ static inline void netdev_for_each_tx_queue(struct net_device *dev,
 }
 
 struct netdev_queue *netdev_pick_tx(struct net_device *dev,
-				    struct sk_buff *skb);
+				    struct sk_buff *skb,
+				    void *accel_priv);
 u16 __netdev_pick_tx(struct net_device *dev, struct sk_buff *skb);
 
 /*
@@ -1632,7 +1635,10 @@ struct napi_gro_cb {
 	int data_offset;
 
 	/* This is non-zero if the packet cannot be merged with the new skb. */
-	int flush;
+	u16	flush;
+
+	/* Save the IP ID here and check when we get to the transport layer */
+	u16	flush_id;
 
 	/* Number of segments aggregated. */
 	u16	count;
@@ -1650,6 +1656,9 @@ struct napi_gro_cb {
 
 	/* Used in ipv6_gro_receive() */
 	int	proto;
+
+	/* used to support CHECKSUM_COMPLETE for tunneling protocols */
+	__wsum	csum;
 
 	/* used in skb_gro_receive() slow path */
 	struct sk_buff *last;
@@ -1683,6 +1692,15 @@ struct packet_offload {
 	__be16			 type;	/* This is really htons(ether_type). */
 	struct offload_callbacks callbacks;
 	struct list_head	 list;
+};
+
+/* often modified stats are per cpu, other are shared (netdev->stats) */
+struct pcpu_sw_netstats {
+	u64     rx_packets;
+	u64     rx_bytes;
+	u64     tx_packets;
+	u64     tx_bytes;
+	struct u64_stats_sync   syncp;
 };
 
 #include <linux/notifier.h>
@@ -1741,8 +1759,6 @@ netdev_notifier_info_to_dev(const struct netdev_notifier_info *info)
 	return info->dev;
 }
 
-int call_netdevice_notifiers_info(unsigned long val, struct net_device *dev,
-				  struct netdev_notifier_info *info);
 int call_netdevice_notifiers(unsigned long val, struct net_device *dev);
 
 
@@ -1809,7 +1825,6 @@ void dev_remove_pack(struct packet_type *pt);
 void __dev_remove_pack(struct packet_type *pt);
 void dev_add_offload(struct packet_offload *po);
 void dev_remove_offload(struct packet_offload *po);
-void __dev_remove_offload(struct packet_offload *po);
 
 struct net_device *dev_get_by_flags_rcu(struct net *net, unsigned short flags,
 					unsigned short mask);
@@ -1822,6 +1837,7 @@ int dev_close(struct net_device *dev);
 void dev_disable_lro(struct net_device *dev);
 int dev_loopback_xmit(struct sk_buff *newskb);
 int dev_queue_xmit(struct sk_buff *skb);
+int dev_queue_xmit_accel(struct sk_buff *skb, void *accel_priv);
 int register_netdevice(struct net_device *dev);
 void unregister_netdevice_queue(struct net_device *dev, struct list_head *head);
 void unregister_netdevice_many(struct list_head *head);
@@ -1894,6 +1910,14 @@ static inline void *skb_gro_network_header(struct sk_buff *skb)
 	       skb_network_offset(skb);
 }
 
+static inline void skb_gro_postpull_rcsum(struct sk_buff *skb,
+					const void *start, unsigned int len)
+{
+	if (skb->ip_summed == CHECKSUM_COMPLETE)
+		NAPI_GRO_CB(skb)->csum = csum_sub(NAPI_GRO_CB(skb)->csum,
+						  csum_partial(start, len, 0));
+}
+
 static inline int dev_hard_header(struct sk_buff *skb, struct net_device *dev,
 				  unsigned short type,
 				  const void *daddr, const void *saddr,
@@ -1913,6 +1937,15 @@ static inline int dev_parse_header(const struct sk_buff *skb,
 	if (!dev->header_ops || !dev->header_ops->parse)
 		return 0;
 	return dev->header_ops->parse(skb, haddr);
+}
+
+static inline int dev_rebuild_header(struct sk_buff *skb)
+{
+	const struct net_device *dev = skb->dev;
+
+	if (!dev->header_ops || !dev->header_ops->rebuild)
+		return 0;
+	return dev->header_ops->rebuild(skb);
 }
 
 typedef int gifconf_func_t(struct net_device * dev, char __user * bufptr, int len);
@@ -2425,6 +2458,8 @@ gro_result_t napi_gro_receive(struct napi_struct *napi, struct sk_buff *skb);
 void napi_gro_flush(struct napi_struct *napi, bool flush_old);
 struct sk_buff *napi_get_frags(struct napi_struct *napi);
 gro_result_t napi_gro_frags(struct napi_struct *napi);
+struct packet_offload *gro_find_receive_by_type(__be16 type);
+struct packet_offload *gro_find_complete_by_type(__be16 type);
 
 static inline void napi_free_frags(struct napi_struct *napi)
 {
@@ -2455,7 +2490,7 @@ int dev_change_carrier(struct net_device *, bool new_carrier);
 int dev_get_phys_port_id(struct net_device *dev,
 			 struct netdev_phys_port_id *ppid);
 int dev_hard_start_xmit(struct sk_buff *skb, struct net_device *dev,
-			struct netdev_queue *txq, void *accel_priv);
+			struct netdev_queue *txq);
 int dev_forward_skb(struct net_device *dev, struct sk_buff *skb);
 
 extern int		netdev_budget;
@@ -2867,7 +2902,6 @@ extern int		weight_p;
 extern int		bpf_jit_enable;
 
 bool netdev_has_upper_dev(struct net_device *dev, struct net_device *upper_dev);
-bool netdev_has_any_upper_dev(struct net_device *dev);
 struct net_device *netdev_all_upper_get_next_dev_rcu(struct net_device *dev,
 						     struct list_head **iter);
 
@@ -2907,8 +2941,7 @@ int netdev_master_upper_dev_link_private(struct net_device *dev,
 					 void *private);
 void netdev_upper_dev_unlink(struct net_device *dev,
 			     struct net_device *upper_dev);
-void *netdev_lower_dev_get_private_rcu(struct net_device *dev,
-				       struct net_device *lower_dev);
+void netdev_adjacent_rename_links(struct net_device *dev, char *oldname);
 void *netdev_lower_dev_get_private(struct net_device *dev,
 				   struct net_device *lower_dev);
 int skb_checksum_help(struct sk_buff *skb);
@@ -3034,6 +3067,19 @@ static inline void netif_set_gso_max_size(struct net_device *dev,
 					  unsigned int size)
 {
 	dev->gso_max_size = size;
+}
+
+static inline void skb_gso_error_unwind(struct sk_buff *skb, __be16 protocol,
+					int pulled_hlen, u16 mac_offset,
+					int mac_len)
+{
+	skb->protocol = protocol;
+	skb->encapsulation = 1;
+	skb_push(skb, pulled_hlen);
+	skb_reset_transport_header(skb);
+	skb->mac_header = mac_offset;
+	skb->network_header = skb->mac_header + mac_len;
+	skb->mac_len = mac_len;
 }
 
 static inline bool netif_is_macvlan(struct net_device *dev)

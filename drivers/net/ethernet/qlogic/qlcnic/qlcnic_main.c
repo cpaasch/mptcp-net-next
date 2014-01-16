@@ -313,7 +313,7 @@ static void qlcnic_delete_adapter_mac(struct qlcnic_adapter *adapter)
 
 	list_for_each(head, &adapter->mac_list) {
 		cur = list_entry(head, struct qlcnic_mac_vlan_list, list);
-		if (!memcmp(adapter->mac_addr, cur->mac_addr, ETH_ALEN)) {
+		if (ether_addr_equal_unaligned(adapter->mac_addr, cur->mac_addr)) {
 			qlcnic_sre_macaddr_change(adapter, cur->mac_addr,
 						  0, QLCNIC_MAC_DEL);
 			list_del(&cur->list);
@@ -337,7 +337,7 @@ static int qlcnic_set_mac(struct net_device *netdev, void *p)
 	if (!is_valid_ether_addr(addr->sa_data))
 		return -EINVAL;
 
-	if (!memcmp(adapter->mac_addr, addr->sa_data, ETH_ALEN))
+	if (ether_addr_equal_unaligned(adapter->mac_addr, addr->sa_data))
 		return 0;
 
 	if (test_bit(__QLCNIC_DEV_UP, &adapter->state)) {
@@ -546,6 +546,7 @@ static struct qlcnic_hardware_ops qlcnic_hw_ops = {
 	.io_error_detected		= qlcnic_82xx_io_error_detected,
 	.io_slot_reset			= qlcnic_82xx_io_slot_reset,
 	.io_resume			= qlcnic_82xx_io_resume,
+	.get_beacon_state		= qlcnic_82xx_get_beacon_state,
 };
 
 static int qlcnic_check_multi_tx_capability(struct qlcnic_adapter *adapter)
@@ -1757,7 +1758,6 @@ void __qlcnic_down(struct qlcnic_adapter *adapter, struct net_device *netdev)
 	if (qlcnic_sriov_vf_check(adapter))
 		qlcnic_sriov_cleanup_async_list(&adapter->ahw->sriov->bc);
 	smp_mb();
-	spin_lock(&adapter->tx_clean_lock);
 	netif_carrier_off(netdev);
 	adapter->ahw->linkup = 0;
 	netif_tx_disable(netdev);
@@ -1778,7 +1778,6 @@ void __qlcnic_down(struct qlcnic_adapter *adapter, struct net_device *netdev)
 
 	for (ring = 0; ring < adapter->drv_tx_rings; ring++)
 		qlcnic_release_tx_buffers(adapter, &adapter->tx_ring[ring]);
-	spin_unlock(&adapter->tx_clean_lock);
 }
 
 /* Usage: During suspend and firmware recovery module */
@@ -2173,6 +2172,7 @@ int qlcnic_alloc_tx_rings(struct qlcnic_adapter *adapter,
 		}
 		memset(cmd_buf_arr, 0, TX_BUFF_RINGSIZE(tx_ring));
 		tx_ring->cmd_buf_arr = cmd_buf_arr;
+		spin_lock_init(&tx_ring->tx_clean_lock);
 	}
 
 	if (qlcnic_83xx_check(adapter) ||
@@ -2300,7 +2300,6 @@ qlcnic_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	rwlock_init(&adapter->ahw->crb_lock);
 	mutex_init(&adapter->ahw->mem_lock);
 
-	spin_lock_init(&adapter->tx_clean_lock);
 	INIT_LIST_HEAD(&adapter->mac_list);
 
 	qlcnic_register_dcb(adapter);
@@ -2780,6 +2779,9 @@ static struct net_device_stats *qlcnic_get_stats(struct net_device *netdev)
 {
 	struct qlcnic_adapter *adapter = netdev_priv(netdev);
 	struct net_device_stats *stats = &netdev->stats;
+
+	if (test_bit(__QLCNIC_DEV_UP, &adapter->state))
+		qlcnic_update_stats(adapter);
 
 	stats->rx_packets = adapter->stats.rx_pkts + adapter->stats.lro_pkts;
 	stats->tx_packets = adapter->stats.xmitfinished;

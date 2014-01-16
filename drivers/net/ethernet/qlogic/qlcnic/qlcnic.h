@@ -38,8 +38,8 @@
 
 #define _QLCNIC_LINUX_MAJOR 5
 #define _QLCNIC_LINUX_MINOR 3
-#define _QLCNIC_LINUX_SUBVERSION 53
-#define QLCNIC_LINUX_VERSIONID  "5.3.53"
+#define _QLCNIC_LINUX_SUBVERSION 54
+#define QLCNIC_LINUX_VERSIONID  "5.3.54"
 #define QLCNIC_DRV_IDC_VER  0x01
 #define QLCNIC_DRIVER_VERSION  ((_QLCNIC_LINUX_MAJOR << 16) |\
 		 (_QLCNIC_LINUX_MINOR << 8) | (_QLCNIC_LINUX_SUBVERSION))
@@ -493,6 +493,7 @@ struct qlcnic_hardware_context {
 	struct qlcnic_mailbox *mailbox;
 	u8 extend_lb_time;
 	u8 phys_port_id[ETH_ALEN];
+	u8 lb_mode;
 };
 
 struct qlcnic_adapter_stats {
@@ -584,6 +585,8 @@ struct qlcnic_host_tx_ring {
 	dma_addr_t phys_addr;
 	dma_addr_t hw_cons_phys_addr;
 	struct netdev_queue *txq;
+	/* Lock to protect Tx descriptors cleanup */
+	spinlock_t tx_clean_lock;
 } ____cacheline_internodealigned_in_smp;
 
 /*
@@ -815,6 +818,7 @@ struct qlcnic_mac_vlan_list {
 
 #define QLCNIC_ILB_MODE		0x1
 #define QLCNIC_ELB_MODE		0x2
+#define QLCNIC_LB_MODE_MASK	0x3
 
 #define QLCNIC_LINKEVENT	0x1
 #define QLCNIC_LB_RESPONSE	0x2
@@ -966,6 +970,9 @@ struct qlcnic_ipaddr {
 #define QLCNIC_BEACON_EANBLE		0xC
 #define QLCNIC_BEACON_DISABLE		0xD
 
+#define QLCNIC_BEACON_ON		2
+#define QLCNIC_BEACON_OFF		0
+
 #define QLCNIC_MSIX_TBL_SPACE		8192
 #define QLCNIC_PCI_REG_MSIX_TBL 	0x44
 #define QLCNIC_MSIX_TBL_PGSIZE		4096
@@ -1075,6 +1082,7 @@ struct qlcnic_adapter {
 	u64 dev_rst_time;
 	bool drv_mac_learn;
 	bool fdb_mac_learn;
+	u8 rx_mac_learn;
 	unsigned long vlans[BITS_TO_LONGS(VLAN_N_VID)];
 	u8 flash_mfg_id;
 	struct qlcnic_npar_info *npars;
@@ -1100,7 +1108,6 @@ struct qlcnic_adapter {
 	struct qlcnic_filter_hash rx_fhash;
 	struct list_head vf_mc_list;
 
-	spinlock_t tx_clean_lock;
 	spinlock_t mac_learn_lock;
 	/* spinlock for catching rcv filters for eswitch traffic */
 	spinlock_t rx_mac_learn_lock;
@@ -1264,7 +1271,7 @@ struct qlcnic_pci_func_cfg {
 	u16	port_num;
 	u8	pci_func;
 	u8	func_state;
-	u8	def_mac_addr[6];
+	u8	def_mac_addr[ETH_ALEN];
 };
 
 struct qlcnic_npar_func_cfg {
@@ -1637,7 +1644,6 @@ int qlcnic_set_default_offload_settings(struct qlcnic_adapter *);
 int qlcnic_reset_npar_config(struct qlcnic_adapter *);
 int qlcnic_set_eswitch_port_config(struct qlcnic_adapter *);
 void qlcnic_add_lb_filter(struct qlcnic_adapter *, struct sk_buff *, int, u16);
-int qlcnic_get_beacon_state(struct qlcnic_adapter *, u8 *);
 int qlcnic_83xx_configure_opmode(struct qlcnic_adapter *adapter);
 int qlcnic_read_mac_addr(struct qlcnic_adapter *);
 int qlcnic_setup_netdev(struct qlcnic_adapter *, struct net_device *, int);
@@ -1717,6 +1723,7 @@ int qlcnic_83xx_init_mailbox_work(struct qlcnic_adapter *);
 void qlcnic_83xx_detach_mailbox_work(struct qlcnic_adapter *);
 void qlcnic_83xx_reinit_mbx_work(struct qlcnic_mailbox *mbx);
 void qlcnic_83xx_free_mailbox(struct qlcnic_mailbox *mbx);
+void qlcnic_update_stats(struct qlcnic_adapter *);
 
 /* Adapter hardware abstraction */
 struct qlcnic_hardware_ops {
@@ -1764,6 +1771,7 @@ struct qlcnic_hardware_ops {
 					       pci_channel_state_t);
 	pci_ers_result_t (*io_slot_reset) (struct pci_dev *);
 	void (*io_resume) (struct pci_dev *);
+	void (*get_beacon_state)(struct qlcnic_adapter *);
 };
 
 extern struct qlcnic_nic_template qlcnic_vf_ops;
@@ -1988,6 +1996,11 @@ static inline void qlcnic_set_mac_filter_count(struct qlcnic_adapter *adapter)
 {
 	if (adapter->ahw->hw_ops->set_mac_filter_count)
 		adapter->ahw->hw_ops->set_mac_filter_count(adapter);
+}
+
+static inline void qlcnic_get_beacon_state(struct qlcnic_adapter *adapter)
+{
+	adapter->ahw->hw_ops->get_beacon_state(adapter);
 }
 
 static inline void qlcnic_read_phys_port_id(struct qlcnic_adapter *adapter)

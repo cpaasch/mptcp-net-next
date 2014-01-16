@@ -1,7 +1,7 @@
 /*******************************************************************************
  *
  * Intel Ethernet Controller XL710 Family Linux Driver
- * Copyright(c) 2013 Intel Corporation.
+ * Copyright(c) 2013 - 2014 Intel Corporation.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU General Public License,
@@ -12,9 +12,8 @@
  * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
  * more details.
  *
- * You should have received a copy of the GNU General Public License along with
- * this program; if not, write to the Free Software Foundation, Inc.,
- * 51 Franklin St - Fifth Floor, Boston, MA 02110-1301 USA.
+ * You should have received a copy of the GNU General Public License along
+ * with this program.  If not, see <http://www.gnu.org/licenses/>.
  *
  * The full GNU General Public License is included in this distribution in
  * the file called "COPYING".
@@ -25,11 +24,13 @@
  *
  ******************************************************************************/
 
+#ifndef _I40E_TXRX_H_
+#define _I40E_TXRX_H_
+
 /* Interrupt Throttling and Rate Limiting (storm control) Goodies */
 
-#define I40E_MAX_ITR               0x07FF
-#define I40E_MIN_ITR               0x0001
-#define I40E_ITR_USEC_RESOLUTION   2
+#define I40E_MAX_ITR               0x0FF0  /* reg uses 2 usec resolution */
+#define I40E_MIN_ITR               0x0004  /* reg uses 2 usec resolution */
 #define I40E_MAX_IRATE             0x03F
 #define I40E_MIN_IRATE             0x001
 #define I40E_IRATE_USEC_RESOLUTION 4
@@ -65,6 +66,26 @@ enum i40e_dyn_idx_t {
 #define I40E_RX_ITR    I40E_IDX_ITR0
 #define I40E_TX_ITR    I40E_IDX_ITR1
 #define I40E_PE_ITR    I40E_IDX_ITR2
+
+/* Supported RSS offloads */
+#define I40E_DEFAULT_RSS_HENA ( \
+	((u64)1 << I40E_FILTER_PCTYPE_NONF_UNICAST_IPV4_UDP) | \
+	((u64)1 << I40E_FILTER_PCTYPE_NONF_MULTICAST_IPV4_UDP) | \
+	((u64)1 << I40E_FILTER_PCTYPE_NONF_IPV4_UDP) | \
+	((u64)1 << I40E_FILTER_PCTYPE_NONF_IPV4_SCTP) | \
+	((u64)1 << I40E_FILTER_PCTYPE_NONF_IPV4_TCP_SYN) | \
+	((u64)1 << I40E_FILTER_PCTYPE_NONF_IPV4_TCP) | \
+	((u64)1 << I40E_FILTER_PCTYPE_NONF_IPV4_OTHER) | \
+	((u64)1 << I40E_FILTER_PCTYPE_FRAG_IPV4) | \
+	((u64)1 << I40E_FILTER_PCTYPE_NONF_UNICAST_IPV6_UDP) | \
+	((u64)1 << I40E_FILTER_PCTYPE_NONF_MULTICAST_IPV6_UDP) | \
+	((u64)1 << I40E_FILTER_PCTYPE_NONF_IPV6_UDP) | \
+	((u64)1 << I40E_FILTER_PCTYPE_NONF_IPV6_TCP_SYN) | \
+	((u64)1 << I40E_FILTER_PCTYPE_NONF_IPV6_TCP) | \
+	((u64)1 << I40E_FILTER_PCTYPE_NONF_IPV6_SCTP) | \
+	((u64)1 << I40E_FILTER_PCTYPE_NONF_IPV6_OTHER) | \
+	((u64)1 << I40E_FILTER_PCTYPE_FRAG_IPV6) | \
+	((u64)1 << I40E_FILTER_PCTYPE_L2_PAYLOAD))
 
 /* Supported Rx Buffer Sizes */
 #define I40E_RXBUFFER_512   512    /* Used for packet split */
@@ -115,6 +136,7 @@ enum i40e_dyn_idx_t {
 #define I40E_TX_FLAGS_IPV6		(u32)(1 << 5)
 #define I40E_TX_FLAGS_FCCRC		(u32)(1 << 6)
 #define I40E_TX_FLAGS_FSO		(u32)(1 << 7)
+#define I40E_TX_FLAGS_TSYN		(u32)(1 << 8)
 #define I40E_TX_FLAGS_VLAN_MASK		0xffff0000
 #define I40E_TX_FLAGS_VLAN_PRIO_MASK	0xe0000000
 #define I40E_TX_FLAGS_VLAN_PRIO_SHIFT	29
@@ -152,8 +174,8 @@ struct i40e_tx_queue_stats {
 
 struct i40e_rx_queue_stats {
 	u64 non_eop_descs;
-	u64 alloc_rx_page_failed;
-	u64 alloc_rx_buff_failed;
+	u64 alloc_page_failed;
+	u64 alloc_buff_failed;
 };
 
 enum i40e_ring_state_t {
@@ -227,6 +249,8 @@ struct i40e_ring {
 	u8 atr_sample_rate;
 	u8 atr_count;
 
+	unsigned long last_rx_timestamp;
+
 	bool ring_active;		/* is ring online or not */
 
 	/* stats structs */
@@ -275,3 +299,4 @@ int i40e_setup_rx_descriptors(struct i40e_ring *rx_ring);
 void i40e_free_tx_resources(struct i40e_ring *tx_ring);
 void i40e_free_rx_resources(struct i40e_ring *rx_ring);
 int i40e_napi_poll(struct napi_struct *napi, int budget);
+#endif /* _I40E_TXRX_H_ */

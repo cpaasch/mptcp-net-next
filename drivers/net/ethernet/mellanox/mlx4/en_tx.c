@@ -39,6 +39,7 @@
 #include <linux/if_vlan.h>
 #include <linux/vmalloc.h>
 #include <linux/tcp.h>
+#include <linux/ip.h>
 #include <linux/moduleparam.h>
 
 #include "mlx4_en.h"
@@ -560,7 +561,10 @@ static int get_real_size(struct sk_buff *skb, struct net_device *dev,
 	int real_size;
 
 	if (skb_is_gso(skb)) {
-		*lso_header_size = skb_transport_offset(skb) + tcp_hdrlen(skb);
+		if (skb->encapsulation)
+			*lso_header_size = (skb_inner_transport_header(skb) - skb->data) + inner_tcp_hdrlen(skb);
+		else
+			*lso_header_size = skb_transport_offset(skb) + tcp_hdrlen(skb);
 		real_size = CTRL_SIZE + skb_shinfo(skb)->nr_frags * DS_SIZE +
 			ALIGN(*lso_header_size + 4, DS_SIZE);
 		if (unlikely(*lso_header_size != skb_headlen(skb))) {
@@ -624,7 +628,8 @@ static void build_inline_wqe(struct mlx4_en_tx_desc *tx_desc, struct sk_buff *sk
 	}
 }
 
-u16 mlx4_en_select_queue(struct net_device *dev, struct sk_buff *skb)
+u16 mlx4_en_select_queue(struct net_device *dev, struct sk_buff *skb,
+			 void *accel_priv)
 {
 	struct mlx4_en_priv *priv = netdev_priv(dev);
 	u16 rings_p_up = priv->num_tx_rings_p_up;
@@ -857,6 +862,14 @@ netdev_tx_t mlx4_en_xmit(struct sk_buff *skb, struct net_device *dev)
 	if (tx_info->inl) {
 		build_inline_wqe(tx_desc, skb, real_size, &vlan_tag, tx_ind, fragptr);
 		tx_info->inl = 1;
+	}
+
+	if (skb->encapsulation) {
+		struct iphdr *ipv4 = (struct iphdr *)skb_inner_network_header(skb);
+		if (ipv4->protocol == IPPROTO_TCP || ipv4->protocol == IPPROTO_UDP)
+			op_own |= cpu_to_be32(MLX4_WQE_CTRL_IIP | MLX4_WQE_CTRL_ILP);
+		else
+			op_own |= cpu_to_be32(MLX4_WQE_CTRL_IIP);
 	}
 
 	ring->prod += nr_txbb;

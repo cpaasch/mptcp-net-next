@@ -827,7 +827,7 @@ static inline struct skb_shared_hwtstamps *skb_hwtstamps(struct sk_buff *skb)
  */
 static inline int skb_queue_empty(const struct sk_buff_head *list)
 {
-	return list->next == (struct sk_buff *)list;
+	return list->next == (const struct sk_buff *) list;
 }
 
 /**
@@ -840,7 +840,7 @@ static inline int skb_queue_empty(const struct sk_buff_head *list)
 static inline bool skb_queue_is_last(const struct sk_buff_head *list,
 				     const struct sk_buff *skb)
 {
-	return skb->next == (struct sk_buff *)list;
+	return skb->next == (const struct sk_buff *) list;
 }
 
 /**
@@ -853,7 +853,7 @@ static inline bool skb_queue_is_last(const struct sk_buff_head *list,
 static inline bool skb_queue_is_first(const struct sk_buff_head *list,
 				      const struct sk_buff *skb)
 {
-	return skb->prev == (struct sk_buff *)list;
+	return skb->prev == (const struct sk_buff *) list;
 }
 
 /**
@@ -1715,6 +1715,11 @@ static inline void skb_set_mac_header(struct sk_buff *skb, const int offset)
 	skb->mac_header += offset;
 }
 
+static inline void skb_pop_mac_header(struct sk_buff *skb)
+{
+	skb->mac_header = skb->network_header;
+}
+
 static inline void skb_probe_transport_header(struct sk_buff *skb,
 					      const int offset_hint)
 {
@@ -2440,6 +2445,9 @@ int skb_splice_bits(struct sk_buff *skb, unsigned int offset,
 		    struct pipe_inode_info *pipe, unsigned int len,
 		    unsigned int flags);
 void skb_copy_and_csum_dev(const struct sk_buff *skb, u8 *to);
+unsigned int skb_zerocopy_headlen(const struct sk_buff *from);
+void skb_zerocopy(struct sk_buff *to, const struct sk_buff *from,
+		  int len, int hlen);
 void skb_split(struct sk_buff *skb, struct sk_buff *skb1, const u32 len);
 int skb_shift(struct sk_buff *tgt, struct sk_buff *skb, int shiftlen);
 void skb_scrub_packet(struct sk_buff *skb, bool xnet);
@@ -2620,6 +2628,10 @@ static inline void sw_tx_timestamp(struct sk_buff *skb)
  *
  * Ethernet MAC Drivers should call this function in their hard_xmit()
  * function immediately before giving the sk_buff to the MAC hardware.
+ *
+ * Specifically, one should make absolutely sure that this function is
+ * called before TX completion of this packet can trigger.  Otherwise
+ * the packet could potentially already be freed.
  *
  * @skb: A socket buffer.
  */
@@ -2880,6 +2892,8 @@ static inline void skb_checksum_none_assert(const struct sk_buff *skb)
 }
 
 bool skb_partial_csum_set(struct sk_buff *skb, u16 start, u16 off);
+
+int skb_checksum_setup(struct sk_buff *skb, bool recalculate);
 
 u32 __skb_get_poff(const struct sk_buff *skb);
 

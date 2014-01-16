@@ -418,8 +418,10 @@ int ieee80211_add_virtual_monitor(struct ieee80211_local *local)
 		return ret;
 	}
 
+	mutex_lock(&local->mtx);
 	ret = ieee80211_vif_use_channel(sdata, &local->monitor_chandef,
 					IEEE80211_CHANCTX_EXCLUSIVE);
+	mutex_unlock(&local->mtx);
 	if (ret) {
 		drv_remove_interface(local, sdata);
 		kfree(sdata);
@@ -456,7 +458,9 @@ void ieee80211_del_virtual_monitor(struct ieee80211_local *local)
 
 	synchronize_net();
 
+	mutex_lock(&local->mtx);
 	ieee80211_vif_release_channel(sdata);
+	mutex_unlock(&local->mtx);
 
 	drv_remove_interface(local, sdata);
 
@@ -786,10 +790,8 @@ static void ieee80211_do_stop(struct ieee80211_sub_if_data *sdata,
 	 * This is relevant only in WDS mode, in all other modes we've
 	 * already removed all stations when disconnecting or similar,
 	 * so warn otherwise.
-	 *
-	 * We call sta_info_flush_cleanup() later, to combine RCU waits.
 	 */
-	flushed = sta_info_flush_defer(sdata);
+	flushed = sta_info_flush(sdata);
 	WARN_ON_ONCE((sdata->vif.type != NL80211_IFTYPE_WDS && flushed > 0) ||
 		     (sdata->vif.type == NL80211_IFTYPE_WDS && flushed != 1));
 
@@ -828,9 +830,9 @@ static void ieee80211_do_stop(struct ieee80211_sub_if_data *sdata,
 	if (sdata->wdev.cac_started) {
 		chandef = sdata->vif.bss_conf.chandef;
 		WARN_ON(local->suspended);
-		mutex_lock(&local->iflist_mtx);
+		mutex_lock(&local->mtx);
 		ieee80211_vif_release_channel(sdata);
-		mutex_unlock(&local->iflist_mtx);
+		mutex_unlock(&local->mtx);
 		cfg80211_cac_event(sdata->dev, &chandef,
 				   NL80211_RADAR_CAC_ABORTED,
 				   GFP_KERNEL);
@@ -891,23 +893,15 @@ static void ieee80211_do_stop(struct ieee80211_sub_if_data *sdata,
 		cancel_work_sync(&sdata->work);
 		/*
 		 * When we get here, the interface is marked down.
+		 * Free the remaining keys, if there are any
+		 * (shouldn't be, except maybe in WDS mode?)
 		 *
-		 * sta_info_flush_cleanup() requires rcu_barrier()
-		 * first to wait for the station call_rcu() calls
-		 * to complete, and we also need synchronize_rcu()
-		 * to wait for the RX path in case it is using the
-		 * interface and enqueuing frames at this very time on
+		 * Force the key freeing to always synchronize_net()
+		 * to wait for the RX path in case it is using this
+		 * interface enqueuing frames * at this very time on
 		 * another CPU.
 		 */
-		synchronize_rcu();
-		rcu_barrier();
-		sta_info_flush_cleanup(sdata);
-
-		/*
-		 * Free all remaining keys, there shouldn't be any,
-		 * except maybe in WDS mode?
-		 */
-		ieee80211_free_keys(sdata);
+		ieee80211_free_keys(sdata, true);
 
 		/* fall through */
 	case NL80211_IFTYPE_AP:
@@ -1018,17 +1012,6 @@ static void ieee80211_set_multicast_list(struct net_device *dev)
 			atomic_dec(&local->iff_promiscs);
 		sdata->flags ^= IEEE80211_SDATA_PROMISC;
 	}
-
-	/*
-	 * TODO: If somebody needs this on AP interfaces,
-	 *	 it can be enabled easily but multicast
-	 *	 addresses from VLANs need to be synced.
-	 */
-	if (sdata->vif.type != NL80211_IFTYPE_MONITOR &&
-	    sdata->vif.type != NL80211_IFTYPE_AP_VLAN &&
-	    sdata->vif.type != NL80211_IFTYPE_AP)
-		drv_set_multicast_list(local, sdata, &dev->mc);
-
 	spin_lock_bh(&local->filter_lock);
 	__hw_addr_sync(&local->mc_list, &dev->mc, dev->addr_len);
 	spin_unlock_bh(&local->filter_lock);
@@ -1044,7 +1027,7 @@ static void ieee80211_teardown_sdata(struct ieee80211_sub_if_data *sdata)
 	int i;
 
 	/* free extra data */
-	ieee80211_free_keys(sdata);
+	ieee80211_free_keys(sdata, false);
 
 	ieee80211_debugfs_remove_netdev(sdata);
 
@@ -1062,7 +1045,8 @@ static void ieee80211_uninit(struct net_device *dev)
 }
 
 static u16 ieee80211_netdev_select_queue(struct net_device *dev,
-					 struct sk_buff *skb)
+					 struct sk_buff *skb,
+					 void *accel_priv)
 {
 	return ieee80211_select_queue(IEEE80211_DEV_TO_SUB_IF(dev), skb);
 }
@@ -1079,7 +1063,8 @@ static const struct net_device_ops ieee80211_dataif_ops = {
 };
 
 static u16 ieee80211_monitor_select_queue(struct net_device *dev,
-					  struct sk_buff *skb)
+					  struct sk_buff *skb,
+					  void *accel_priv)
 {
 	struct ieee80211_sub_if_data *sdata = IEEE80211_DEV_TO_SUB_IF(dev);
 	struct ieee80211_local *local = sdata->local;
@@ -1578,15 +1563,6 @@ static void ieee80211_assign_perm_addr(struct ieee80211_local *local,
 	mutex_unlock(&local->iflist_mtx);
 }
 
-static void ieee80211_cleanup_sdata_stas_wk(struct work_struct *wk)
-{
-	struct ieee80211_sub_if_data *sdata;
-
-	sdata = container_of(wk, struct ieee80211_sub_if_data, cleanup_stations_wk);
-
-	ieee80211_cleanup_sdata_stas(sdata);
-}
-
 int ieee80211_if_add(struct ieee80211_local *local, const char *name,
 		     struct wireless_dev **new_wdev, enum nl80211_iftype type,
 		     struct vif_params *params)
@@ -1659,9 +1635,6 @@ int ieee80211_if_add(struct ieee80211_local *local, const char *name,
 
 	INIT_LIST_HEAD(&sdata->key_list);
 
-	spin_lock_init(&sdata->cleanup_stations_lock);
-	INIT_LIST_HEAD(&sdata->cleanup_stations);
-	INIT_WORK(&sdata->cleanup_stations_wk, ieee80211_cleanup_sdata_stas_wk);
 	INIT_DELAYED_WORK(&sdata->dfs_cac_timer_work,
 			  ieee80211_dfs_cac_timer_work);
 	INIT_DELAYED_WORK(&sdata->dec_tailroom_needed_wk,

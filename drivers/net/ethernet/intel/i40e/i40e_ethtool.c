@@ -1,7 +1,7 @@
 /*******************************************************************************
  *
  * Intel Ethernet Controller XL710 Family Linux Driver
- * Copyright(c) 2013 Intel Corporation.
+ * Copyright(c) 2013 - 2014 Intel Corporation.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU General Public License,
@@ -12,9 +12,8 @@
  * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
  * more details.
  *
- * You should have received a copy of the GNU General Public License along with
- * this program; if not, write to the Free Software Foundation, Inc.,
- * 51 Franklin St - Fifth Floor, Boston, MA 02110-1301 USA.
+ * You should have received a copy of the GNU General Public License along
+ * with this program.  If not, see <http://www.gnu.org/licenses/>.
  *
  * The full GNU General Public License is included in this distribution in
  * the file called "COPYING".
@@ -109,6 +108,8 @@ static struct i40e_stats i40e_gstrings_stats[] = {
 	I40E_PF_STAT("rx_oversize", stats.rx_oversize),
 	I40E_PF_STAT("rx_jabber", stats.rx_jabber),
 	I40E_PF_STAT("VF_admin_queue_requests", vf_aq_requests),
+	I40E_PF_STAT("tx_hwtstamp_timeouts", tx_hwtstamp_timeouts),
+	I40E_PF_STAT("rx_hwtstamp_cleared", rx_hwtstamp_cleared),
 };
 
 #define I40E_QUEUE_STATS_LEN(n) \
@@ -351,38 +352,56 @@ static int i40e_get_eeprom(struct net_device *netdev,
 {
 	struct i40e_netdev_priv *np = netdev_priv(netdev);
 	struct i40e_hw *hw = &np->vsi->back->hw;
-	int first_word, last_word;
-	u16 i, eeprom_len;
-	u16 *eeprom_buff;
-	int ret_val = 0;
-
+	struct i40e_pf *pf = np->vsi->back;
+	int ret_val = 0, len;
+	u8 *eeprom_buff;
+	u16 i, sectors;
+	bool last;
+#define I40E_NVM_SECTOR_SIZE  4096
 	if (eeprom->len == 0)
 		return -EINVAL;
 
 	eeprom->magic = hw->vendor_id | (hw->device_id << 16);
 
-	first_word = eeprom->offset >> 1;
-	last_word = (eeprom->offset + eeprom->len - 1) >> 1;
-	eeprom_len = last_word - first_word + 1;
-
-	eeprom_buff = kmalloc(sizeof(u16) * eeprom_len, GFP_KERNEL);
+	eeprom_buff = kzalloc(eeprom->len, GFP_KERNEL);
 	if (!eeprom_buff)
 		return -ENOMEM;
 
-	ret_val = i40e_read_nvm_buffer(hw, first_word, &eeprom_len,
-					   eeprom_buff);
-	if (eeprom_len == 0) {
-		kfree(eeprom_buff);
-		return -EACCES;
+	ret_val = i40e_acquire_nvm(hw, I40E_RESOURCE_READ);
+	if (ret_val) {
+		dev_info(&pf->pdev->dev,
+			 "Failed Acquiring NVM resource for read err=%d status=0x%x\n",
+			 ret_val, hw->aq.asq_last_status);
+		goto free_buff;
 	}
 
-	/* Device's eeprom is always little-endian, word addressable */
-	for (i = 0; i < eeprom_len; i++)
-		le16_to_cpus(&eeprom_buff[i]);
+	sectors = eeprom->len / I40E_NVM_SECTOR_SIZE;
+	sectors += (eeprom->len % I40E_NVM_SECTOR_SIZE) ? 1 : 0;
+	len = I40E_NVM_SECTOR_SIZE;
+	last = false;
+	for (i = 0; i < sectors; i++) {
+		if (i == (sectors - 1)) {
+			len = eeprom->len - (I40E_NVM_SECTOR_SIZE * i);
+			last = true;
+		}
+		ret_val = i40e_aq_read_nvm(hw, 0x0,
+				eeprom->offset + (I40E_NVM_SECTOR_SIZE * i),
+				len,
+				(u8 *)eeprom_buff + (I40E_NVM_SECTOR_SIZE * i),
+				last, NULL);
+		if (ret_val) {
+			dev_info(&pf->pdev->dev,
+				 "read NVM failed err=%d status=0x%x\n",
+				 ret_val, hw->aq.asq_last_status);
+			goto release_nvm;
+		}
+	}
 
-	memcpy(bytes, (u8 *)eeprom_buff + (eeprom->offset & 1), eeprom->len);
+release_nvm:
+	i40e_release_nvm(hw);
+	memcpy(bytes, (u8 *)eeprom_buff, eeprom->len);
+free_buff:
 	kfree(eeprom_buff);
-
 	return ret_val;
 }
 
@@ -390,8 +409,14 @@ static int i40e_get_eeprom_len(struct net_device *netdev)
 {
 	struct i40e_netdev_priv *np = netdev_priv(netdev);
 	struct i40e_hw *hw = &np->vsi->back->hw;
+	u32 val;
 
-	return hw->nvm.sr_size * 2;
+	val = (rd32(hw, I40E_GLPCI_LBARCTRL)
+		& I40E_GLPCI_LBARCTRL_FL_SIZE_MASK)
+		>> I40E_GLPCI_LBARCTRL_FL_SIZE_SHIFT;
+	/* register returns value in power of 2, 64Kbyte chunks. */
+	val = (64 * 1024) * (1 << val);
+	return val;
 }
 
 static void i40e_get_drvinfo(struct net_device *netdev,
@@ -725,7 +750,36 @@ static void i40e_get_strings(struct net_device *netdev, u32 stringset,
 static int i40e_get_ts_info(struct net_device *dev,
 			    struct ethtool_ts_info *info)
 {
-	return ethtool_op_get_ts_info(dev, info);
+	struct i40e_pf *pf = i40e_netdev_to_pf(dev);
+
+	info->so_timestamping = SOF_TIMESTAMPING_TX_SOFTWARE |
+				SOF_TIMESTAMPING_RX_SOFTWARE |
+				SOF_TIMESTAMPING_SOFTWARE |
+				SOF_TIMESTAMPING_TX_HARDWARE |
+				SOF_TIMESTAMPING_RX_HARDWARE |
+				SOF_TIMESTAMPING_RAW_HARDWARE;
+
+	if (pf->ptp_clock)
+		info->phc_index = ptp_clock_index(pf->ptp_clock);
+	else
+		info->phc_index = -1;
+
+	info->tx_types = (1 << HWTSTAMP_TX_OFF) | (1 << HWTSTAMP_TX_ON);
+
+	info->rx_filters = (1 << HWTSTAMP_FILTER_NONE) |
+			   (1 << HWTSTAMP_FILTER_PTP_V1_L4_SYNC) |
+			   (1 << HWTSTAMP_FILTER_PTP_V1_L4_DELAY_REQ) |
+			   (1 << HWTSTAMP_FILTER_PTP_V2_EVENT) |
+			   (1 << HWTSTAMP_FILTER_PTP_V2_L2_EVENT) |
+			   (1 << HWTSTAMP_FILTER_PTP_V2_L4_EVENT) |
+			   (1 << HWTSTAMP_FILTER_PTP_V2_SYNC) |
+			   (1 << HWTSTAMP_FILTER_PTP_V2_L2_SYNC) |
+			   (1 << HWTSTAMP_FILTER_PTP_V2_L4_SYNC) |
+			   (1 << HWTSTAMP_FILTER_PTP_V2_DELAY_REQ) |
+			   (1 << HWTSTAMP_FILTER_PTP_V2_L2_DELAY_REQ) |
+			   (1 << HWTSTAMP_FILTER_PTP_V2_L4_DELAY_REQ);
+
+	return 0;
 }
 
 static int i40e_link_test(struct net_device *netdev, u64 *data)
@@ -844,8 +898,45 @@ static void i40e_diag_test(struct net_device *netdev,
 static void i40e_get_wol(struct net_device *netdev,
 			 struct ethtool_wolinfo *wol)
 {
-	wol->supported = 0;
-	wol->wolopts = 0;
+	struct i40e_netdev_priv *np = netdev_priv(netdev);
+	struct i40e_pf *pf = np->vsi->back;
+	struct i40e_hw *hw = &pf->hw;
+	u16 wol_nvm_bits;
+
+	/* NVM bit on means WoL disabled for the port */
+	i40e_read_nvm_word(hw, I40E_SR_NVM_WAKE_ON_LAN, &wol_nvm_bits);
+	if ((1 << hw->port) & wol_nvm_bits) {
+		wol->supported = 0;
+		wol->wolopts = 0;
+	} else {
+		wol->supported = WAKE_MAGIC;
+		wol->wolopts = (pf->wol_en ? WAKE_MAGIC : 0);
+	}
+}
+
+static int i40e_set_wol(struct net_device *netdev, struct ethtool_wolinfo *wol)
+{
+	struct i40e_netdev_priv *np = netdev_priv(netdev);
+	struct i40e_pf *pf = np->vsi->back;
+	struct i40e_hw *hw = &pf->hw;
+	u16 wol_nvm_bits;
+
+	/* NVM bit on means WoL disabled for the port */
+	i40e_read_nvm_word(hw, I40E_SR_NVM_WAKE_ON_LAN, &wol_nvm_bits);
+	if (((1 << hw->port) & wol_nvm_bits))
+		return -EOPNOTSUPP;
+
+	/* only magic packet is supported */
+	if (wol->wolopts && (wol->wolopts != WAKE_MAGIC))
+		return -EOPNOTSUPP;
+
+	/* is this a new value? */
+	if (pf->wol_en != !!wol->wolopts) {
+		pf->wol_en = !!wol->wolopts;
+		device_set_wakeup_enable(&pf->pdev->dev, pf->wol_en);
+	}
+
+	return 0;
 }
 
 static int i40e_nway_reset(struct net_device *netdev)
@@ -879,13 +970,13 @@ static int i40e_set_phys_id(struct net_device *netdev,
 		pf->led_status = i40e_led_get(hw);
 		return blink_freq;
 	case ETHTOOL_ID_ON:
-		i40e_led_set(hw, 0xF);
+		i40e_led_set(hw, 0xF, false);
 		break;
 	case ETHTOOL_ID_OFF:
-		i40e_led_set(hw, 0x0);
+		i40e_led_set(hw, 0x0, false);
 		break;
 	case ETHTOOL_ID_INACTIVE:
-		i40e_led_set(hw, pf->led_status);
+		i40e_led_set(hw, pf->led_status, false);
 		break;
 	}
 
@@ -1183,6 +1274,7 @@ static int i40e_set_rss_hash_opt(struct i40e_pf *pf, struct ethtool_rxnfc *nfc)
 }
 
 #define IP_HEADER_OFFSET 14
+#define I40E_UDPIP_DUMMY_PACKET_LEN 42
 /**
  * i40e_add_del_fdir_udpv4 - Add/Remove UDPv4 Flow Director filters for
  * a specific flow spec
@@ -1203,6 +1295,12 @@ static int i40e_add_del_fdir_udpv4(struct i40e_vsi *vsi,
 	bool err = false;
 	int ret;
 	int i;
+	char packet[] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x08, 0,
+			 0x45, 0, 0, 0x1c, 0, 0, 0x40, 0, 0x40, 0x11,
+			 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+			 0, 0, 0, 0, 0, 0, 0, 0};
+
+	memcpy(fd_data->raw_packet, packet, I40E_UDPIP_DUMMY_PACKET_LEN);
 
 	ip = (struct iphdr *)(fd_data->raw_packet + IP_HEADER_OFFSET);
 	udp = (struct udphdr *)(fd_data->raw_packet + IP_HEADER_OFFSET
@@ -1233,6 +1331,7 @@ static int i40e_add_del_fdir_udpv4(struct i40e_vsi *vsi,
 	return err ? -EOPNOTSUPP : 0;
 }
 
+#define I40E_TCPIP_DUMMY_PACKET_LEN 54
 /**
  * i40e_add_del_fdir_tcpv4 - Add/Remove TCPv4 Flow Director filters for
  * a specific flow spec
@@ -1252,6 +1351,14 @@ static int i40e_add_del_fdir_tcpv4(struct i40e_vsi *vsi,
 	struct iphdr *ip;
 	bool err = false;
 	int ret;
+	/* Dummy packet */
+	char packet[] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x08, 0,
+			 0x45, 0, 0, 0x28, 0, 0, 0x40, 0, 0x40, 0x6,
+			 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+			 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+			 0x80, 0x11, 0x0, 0x72, 0, 0, 0, 0};
+
+	memcpy(fd_data->raw_packet, packet, I40E_TCPIP_DUMMY_PACKET_LEN);
 
 	ip = (struct iphdr *)(fd_data->raw_packet + IP_HEADER_OFFSET);
 	tcp = (struct tcphdr *)(fd_data->raw_packet + IP_HEADER_OFFSET
@@ -1259,6 +1366,8 @@ static int i40e_add_del_fdir_tcpv4(struct i40e_vsi *vsi,
 
 	ip->daddr = fsp->h_u.tcp_ip4_spec.ip4dst;
 	tcp->dest = fsp->h_u.tcp_ip4_spec.pdst;
+	ip->saddr = fsp->h_u.tcp_ip4_spec.ip4src;
+	tcp->source = fsp->h_u.tcp_ip4_spec.psrc;
 
 	fd_data->pctype = I40E_FILTER_PCTYPE_NONF_IPV4_TCP_SYN;
 	ret = i40e_program_fdir_filter(fd_data, pf, add);
@@ -1272,9 +1381,6 @@ static int i40e_add_del_fdir_tcpv4(struct i40e_vsi *vsi,
 		dev_info(&pf->pdev->dev, "Filter OK for PCTYPE %d (ret = %d)\n",
 			 fd_data->pctype, ret);
 	}
-
-	ip->saddr = fsp->h_u.tcp_ip4_spec.ip4src;
-	tcp->source = fsp->h_u.tcp_ip4_spec.psrc;
 
 	fd_data->pctype = I40E_FILTER_PCTYPE_NONF_IPV4_TCP;
 
@@ -1309,6 +1415,7 @@ static int i40e_add_del_fdir_sctpv4(struct i40e_vsi *vsi,
 	return -EOPNOTSUPP;
 }
 
+#define I40E_IP_DUMMY_PACKET_LEN 34
 /**
  * i40e_add_del_fdir_ipv4 - Add/Remove IPv4 Flow Director filters for
  * a specific flow spec
@@ -1328,7 +1435,11 @@ static int i40e_add_del_fdir_ipv4(struct i40e_vsi *vsi,
 	bool err = false;
 	int ret;
 	int i;
+	char packet[] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x08, 0,
+			 0x45, 0, 0, 0x14, 0, 0, 0x40, 0, 0x40, 0x10,
+			 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
 
+	memcpy(fd_data->raw_packet, packet, I40E_IP_DUMMY_PACKET_LEN);
 	ip = (struct iphdr *)(fd_data->raw_packet + IP_HEADER_OFFSET);
 
 	ip->saddr = fsp->h_u.usr_ip4_spec.ip4src;
@@ -1554,7 +1665,7 @@ static int i40e_set_channels(struct net_device *dev,
 	 * class queue mapping
 	 */
 	new_count = i40e_reconfig_rss_queues(pf, count);
-	if (new_count > 1)
+	if (new_count > 0)
 		return 0;
 	else
 		return -EINVAL;
@@ -1568,6 +1679,7 @@ static const struct ethtool_ops i40e_ethtool_ops = {
 	.nway_reset		= i40e_nway_reset,
 	.get_link		= ethtool_op_get_link,
 	.get_wol		= i40e_get_wol,
+	.set_wol		= i40e_set_wol,
 	.get_eeprom_len		= i40e_get_eeprom_len,
 	.get_eeprom		= i40e_get_eeprom,
 	.get_ringparam		= i40e_get_ringparam,

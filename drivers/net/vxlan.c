@@ -741,10 +741,9 @@ static int vxlan_fdb_parse(struct nlattr *tb[], struct vxlan_dev *vxlan,
 		if (nla_len(tb[NDA_IFINDEX]) != sizeof(u32))
 			return -EINVAL;
 		*ifindex = nla_get_u32(tb[NDA_IFINDEX]);
-		tdev = dev_get_by_index(net, *ifindex);
+		tdev = __dev_get_by_index(net, *ifindex);
 		if (!tdev)
 			return -EADDRNOTAVAIL;
-		dev_put(tdev);
 	} else {
 		*ifindex = 0;
 	}
@@ -1081,7 +1080,7 @@ static void vxlan_rcv(struct vxlan_sock *vs,
 	struct iphdr *oip = NULL;
 	struct ipv6hdr *oip6 = NULL;
 	struct vxlan_dev *vxlan;
-	struct pcpu_tstats *stats;
+	struct pcpu_sw_netstats *stats;
 	union vxlan_addr saddr;
 	__u32 vni;
 	int err = 0;
@@ -1381,20 +1380,6 @@ static bool route_shortcircuit(struct net_device *dev, struct sk_buff *skb)
 	return false;
 }
 
-static void vxlan_sock_put(struct sk_buff *skb)
-{
-	sock_put(skb->sk);
-}
-
-/* On transmit, associate with the tunnel socket */
-static void vxlan_set_owner(struct sock *sk, struct sk_buff *skb)
-{
-	skb_orphan(skb);
-	sock_hold(sk);
-	skb->sk = sk;
-	skb->destructor = vxlan_sock_put;
-}
-
 /* Compute source port for outgoing packet
  *   first choice to use L4 flow hash since it will spread
  *     better and maybe available from hardware
@@ -1514,8 +1499,6 @@ static int vxlan6_xmit_skb(struct vxlan_sock *vs,
 	ip6h->daddr	  = *daddr;
 	ip6h->saddr	  = *saddr;
 
-	vxlan_set_owner(vs->sock->sk, skb);
-
 	err = handle_offloads(skb);
 	if (err)
 		return err;
@@ -1572,8 +1555,6 @@ int vxlan_xmit_skb(struct vxlan_sock *vs,
 	uh->len = htons(skb->len);
 	uh->check = 0;
 
-	vxlan_set_owner(vs->sock->sk, skb);
-
 	err = handle_offloads(skb);
 	if (err)
 		return err;
@@ -1587,11 +1568,12 @@ EXPORT_SYMBOL_GPL(vxlan_xmit_skb);
 static void vxlan_encap_bypass(struct sk_buff *skb, struct vxlan_dev *src_vxlan,
 			       struct vxlan_dev *dst_vxlan)
 {
-	struct pcpu_tstats *tx_stats = this_cpu_ptr(src_vxlan->dev->tstats);
-	struct pcpu_tstats *rx_stats = this_cpu_ptr(dst_vxlan->dev->tstats);
+	struct pcpu_sw_netstats *tx_stats, *rx_stats;
 	union vxlan_addr loopback;
 	union vxlan_addr *remote_ip = &dst_vxlan->default_dst.remote_ip;
 
+	tx_stats = this_cpu_ptr(src_vxlan->dev->tstats);
+	rx_stats = this_cpu_ptr(dst_vxlan->dev->tstats);
 	skb->pkt_type = PACKET_HOST;
 	skb->encapsulation = 0;
 	skb->dev = dst_vxlan->dev;
@@ -1785,7 +1767,7 @@ static netdev_tx_t vxlan_xmit(struct sk_buff *skb, struct net_device *dev)
 	struct vxlan_dev *vxlan = netdev_priv(dev);
 	struct ethhdr *eth;
 	bool did_rsc = false;
-	struct vxlan_rdst *rdst;
+	struct vxlan_rdst *rdst, *fdst = NULL;
 	struct vxlan_fdb *f;
 
 	skb_reset_mac_header(skb);
@@ -1827,7 +1809,7 @@ static netdev_tx_t vxlan_xmit(struct sk_buff *skb, struct net_device *dev)
 				vxlan_fdb_miss(vxlan, eth->h_dest);
 
 			dev->stats.tx_dropped++;
-			dev_kfree_skb(skb);
+			kfree_skb(skb);
 			return NETDEV_TX_OK;
 		}
 	}
@@ -1835,12 +1817,19 @@ static netdev_tx_t vxlan_xmit(struct sk_buff *skb, struct net_device *dev)
 	list_for_each_entry_rcu(rdst, &f->remotes, list) {
 		struct sk_buff *skb1;
 
+		if (!fdst) {
+			fdst = rdst;
+			continue;
+		}
 		skb1 = skb_clone(skb, GFP_ATOMIC);
 		if (skb1)
 			vxlan_xmit_one(skb1, dev, rdst, did_rsc);
 	}
 
-	dev_kfree_skb(skb);
+	if (fdst)
+		vxlan_xmit_one(skb, dev, fdst, did_rsc);
+	else
+		kfree_skb(skb);
 	return NETDEV_TX_OK;
 }
 
@@ -1897,12 +1886,12 @@ static int vxlan_init(struct net_device *dev)
 	struct vxlan_sock *vs;
 	int i;
 
-	dev->tstats = alloc_percpu(struct pcpu_tstats);
+	dev->tstats = alloc_percpu(struct pcpu_sw_netstats);
 	if (!dev->tstats)
 		return -ENOMEM;
 
 	for_each_possible_cpu(i) {
-		struct pcpu_tstats *vxlan_stats;
+		struct pcpu_sw_netstats *vxlan_stats;
 		vxlan_stats = per_cpu_ptr(dev->tstats, i);
 		u64_stats_init(&vxlan_stats->syncp);
 	}
@@ -2476,7 +2465,8 @@ static int vxlan_newlink(struct net *net, struct net_device *dev,
 		/* update header length based on lower device */
 		dev->hard_header_len = lowerdev->hard_header_len +
 				       (use_ipv6 ? VXLAN6_HEADROOM : VXLAN_HEADROOM);
-	}
+	} else if (use_ipv6)
+		vxlan->flags |= VXLAN_F_IPV6;
 
 	if (data[IFLA_VXLAN_TOS])
 		vxlan->tos  = nla_get_u8(data[IFLA_VXLAN_TOS]);
@@ -2665,6 +2655,44 @@ static struct rtnl_link_ops vxlan_link_ops __read_mostly = {
 	.fill_info	= vxlan_fill_info,
 };
 
+static void vxlan_handle_lowerdev_unregister(struct vxlan_net *vn,
+					     struct net_device *dev)
+{
+	struct vxlan_dev *vxlan, *next;
+	LIST_HEAD(list_kill);
+
+	list_for_each_entry_safe(vxlan, next, &vn->vxlan_list, next) {
+		struct vxlan_rdst *dst = &vxlan->default_dst;
+
+		/* In case we created vxlan device with carrier
+		 * and we loose the carrier due to module unload
+		 * we also need to remove vxlan device. In other
+		 * cases, it's not necessary and remote_ifindex
+		 * is 0 here, so no matches.
+		 */
+		if (dst->remote_ifindex == dev->ifindex)
+			vxlan_dellink(vxlan->dev, &list_kill);
+	}
+
+	unregister_netdevice_many(&list_kill);
+}
+
+static int vxlan_lowerdev_event(struct notifier_block *unused,
+				unsigned long event, void *ptr)
+{
+	struct net_device *dev = netdev_notifier_info_to_dev(ptr);
+	struct vxlan_net *vn = net_generic(dev_net(dev), vxlan_net_id);
+
+	if (event == NETDEV_UNREGISTER)
+		vxlan_handle_lowerdev_unregister(vn, dev);
+
+	return NOTIFY_DONE;
+}
+
+static struct notifier_block vxlan_notifier_block __read_mostly = {
+	.notifier_call = vxlan_lowerdev_event,
+};
+
 static __net_init int vxlan_init_net(struct net *net)
 {
 	struct vxlan_net *vn = net_generic(net, vxlan_net_id);
@@ -2682,13 +2710,13 @@ static __net_init int vxlan_init_net(struct net *net)
 static __net_exit void vxlan_exit_net(struct net *net)
 {
 	struct vxlan_net *vn = net_generic(net, vxlan_net_id);
-	struct vxlan_dev *vxlan;
-	LIST_HEAD(list);
+	struct vxlan_dev *vxlan, *next;
+	LIST_HEAD(list_kill);
 
 	rtnl_lock();
-	list_for_each_entry(vxlan, &vn->vxlan_list, next)
-		unregister_netdevice_queue(vxlan->dev, &list);
-	unregister_netdevice_many(&list);
+	list_for_each_entry_safe(vxlan, next, &vn->vxlan_list, next)
+		vxlan_dellink(vxlan->dev, &list_kill);
+	unregister_netdevice_many(&list_kill);
 	rtnl_unlock();
 }
 
@@ -2713,12 +2741,17 @@ static int __init vxlan_init_module(void)
 	if (rc)
 		goto out1;
 
-	rc = rtnl_link_register(&vxlan_link_ops);
+	rc = register_netdevice_notifier(&vxlan_notifier_block);
 	if (rc)
 		goto out2;
 
-	return 0;
+	rc = rtnl_link_register(&vxlan_link_ops);
+	if (rc)
+		goto out3;
 
+	return 0;
+out3:
+	unregister_netdevice_notifier(&vxlan_notifier_block);
 out2:
 	unregister_pernet_device(&vxlan_net_ops);
 out1:
@@ -2730,6 +2763,7 @@ late_initcall(vxlan_init_module);
 static void __exit vxlan_cleanup_module(void)
 {
 	rtnl_link_unregister(&vxlan_link_ops);
+	unregister_netdevice_notifier(&vxlan_notifier_block);
 	destroy_workqueue(vxlan_wq);
 	unregister_pernet_device(&vxlan_net_ops);
 	rcu_barrier();

@@ -486,6 +486,7 @@ static const struct driver_info wwan_info = {
 #define ZTE_VENDOR_ID		0x19D2
 #define DELL_VENDOR_ID		0x413C
 #define REALTEK_VENDOR_ID	0x0bda
+#define SAMSUNG_VENDOR_ID	0x04e8
 
 static const struct usb_device_id	products[] = {
 /* BLACKLIST !!

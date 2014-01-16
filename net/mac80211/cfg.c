@@ -301,9 +301,10 @@ static int ieee80211_get_key(struct wiphy *wiphy, struct net_device *dev,
 		if (!sta)
 			goto out;
 
-		if (pairwise)
+		if (pairwise && key_idx < NUM_DEFAULT_KEYS)
 			key = rcu_dereference(sta->ptk[key_idx]);
-		else if (key_idx < NUM_DEFAULT_KEYS)
+		else if (!pairwise &&
+			 key_idx < NUM_DEFAULT_KEYS + NUM_DEFAULT_MGMT_KEYS)
 			key = rcu_dereference(sta->gtk[key_idx]);
 	} else
 		key = rcu_dereference(sdata->keys[key_idx]);
@@ -827,6 +828,7 @@ static int ieee80211_set_monitor_channel(struct wiphy *wiphy,
 	if (cfg80211_chandef_identical(&local->monitor_chandef, chandef))
 		return 0;
 
+	mutex_lock(&local->mtx);
 	mutex_lock(&local->iflist_mtx);
 	if (local->use_chanctx) {
 		sdata = rcu_dereference_protected(
@@ -845,6 +847,7 @@ static int ieee80211_set_monitor_channel(struct wiphy *wiphy,
 	if (ret == 0)
 		local->monitor_chandef = *chandef;
 	mutex_unlock(&local->iflist_mtx);
+	mutex_unlock(&local->mtx);
 
 	return ret;
 }
@@ -873,8 +876,8 @@ static int ieee80211_set_probe_resp(struct ieee80211_sub_if_data *sdata,
 	return 0;
 }
 
-int ieee80211_assign_beacon(struct ieee80211_sub_if_data *sdata,
-			    struct cfg80211_beacon_data *params)
+static int ieee80211_assign_beacon(struct ieee80211_sub_if_data *sdata,
+				   struct cfg80211_beacon_data *params)
 {
 	struct beacon_data *new, *old;
 	int new_head_len, new_tail_len;
@@ -950,6 +953,7 @@ static int ieee80211_start_ap(struct wiphy *wiphy, struct net_device *dev,
 			      struct cfg80211_ap_settings *params)
 {
 	struct ieee80211_sub_if_data *sdata = IEEE80211_DEV_TO_SUB_IF(dev);
+	struct ieee80211_local *local = sdata->local;
 	struct beacon_data *old;
 	struct ieee80211_sub_if_data *vlan;
 	u32 changed = BSS_CHANGED_BEACON_INT |
@@ -968,8 +972,10 @@ static int ieee80211_start_ap(struct wiphy *wiphy, struct net_device *dev,
 	sdata->needed_rx_chains = sdata->local->rx_chains;
 	sdata->radar_required = params->radar_required;
 
+	mutex_lock(&local->mtx);
 	err = ieee80211_vif_use_channel(sdata, &params->chandef,
 					IEEE80211_CHANCTX_SHARED);
+	mutex_unlock(&local->mtx);
 	if (err)
 		return err;
 	ieee80211_vif_copy_chanctx_to_vlans(sdata, false);
@@ -1097,17 +1103,8 @@ static int ieee80211_stop_ap(struct wiphy *wiphy, struct net_device *dev)
 	if (old_probe_resp)
 		kfree_rcu(old_probe_resp, rcu_head);
 
-	list_for_each_entry(vlan, &sdata->u.ap.vlans, u.vlan.list)
-		sta_info_flush_defer(vlan);
-	sta_info_flush_defer(sdata);
-	synchronize_net();
-	rcu_barrier();
-	list_for_each_entry(vlan, &sdata->u.ap.vlans, u.vlan.list) {
-		sta_info_flush_cleanup(vlan);
-		ieee80211_free_keys(vlan);
-	}
-	sta_info_flush_cleanup(sdata);
-	ieee80211_free_keys(sdata);
+	__sta_info_flush(sdata, true);
+	ieee80211_free_keys(sdata, true);
 
 	sdata->vif.bss_conf.enable_beacon = false;
 	sdata->vif.bss_conf.ssid_len = 0;
@@ -1129,7 +1126,9 @@ static int ieee80211_stop_ap(struct wiphy *wiphy, struct net_device *dev)
 	skb_queue_purge(&sdata->u.ap.ps.bc_buf);
 
 	ieee80211_vif_copy_chanctx_to_vlans(sdata, true);
+	mutex_lock(&local->mtx);
 	ieee80211_vif_release_channel(sdata);
+	mutex_unlock(&local->mtx);
 
 	return 0;
 }
@@ -1952,8 +1951,10 @@ static int ieee80211_join_mesh(struct wiphy *wiphy, struct net_device *dev,
 	sdata->smps_mode = IEEE80211_SMPS_OFF;
 	sdata->needed_rx_chains = sdata->local->rx_chains;
 
+	mutex_lock(&sdata->local->mtx);
 	err = ieee80211_vif_use_channel(sdata, &setup->chandef,
 					IEEE80211_CHANCTX_SHARED);
+	mutex_unlock(&sdata->local->mtx);
 	if (err)
 		return err;
 
@@ -1965,7 +1966,9 @@ static int ieee80211_leave_mesh(struct wiphy *wiphy, struct net_device *dev)
 	struct ieee80211_sub_if_data *sdata = IEEE80211_DEV_TO_SUB_IF(dev);
 
 	ieee80211_stop_mesh(sdata);
+	mutex_lock(&sdata->local->mtx);
 	ieee80211_vif_release_channel(sdata);
+	mutex_unlock(&sdata->local->mtx);
 
 	return 0;
 }
@@ -2587,8 +2590,8 @@ static int ieee80211_set_bitrate_mask(struct wiphy *wiphy,
 		int j;
 
 		sdata->rc_rateidx_mask[i] = mask->control[i].legacy;
-		memcpy(sdata->rc_rateidx_mcs_mask[i], mask->control[i].mcs,
-		       sizeof(mask->control[i].mcs));
+		memcpy(sdata->rc_rateidx_mcs_mask[i], mask->control[i].ht_mcs,
+		       sizeof(mask->control[i].ht_mcs));
 
 		sdata->rc_has_mcs_mask[i] = false;
 		if (!sband)
@@ -2903,26 +2906,29 @@ static int ieee80211_start_radar_detection(struct wiphy *wiphy,
 	unsigned long timeout;
 	int err;
 
-	if (!list_empty(&local->roc_list) || local->scanning)
-		return -EBUSY;
+	mutex_lock(&local->mtx);
+	if (!list_empty(&local->roc_list) || local->scanning) {
+		err = -EBUSY;
+		goto out_unlock;
+	}
 
 	/* whatever, but channel contexts should not complain about that one */
 	sdata->smps_mode = IEEE80211_SMPS_OFF;
 	sdata->needed_rx_chains = local->rx_chains;
 	sdata->radar_required = true;
 
-	mutex_lock(&local->iflist_mtx);
 	err = ieee80211_vif_use_channel(sdata, chandef,
 					IEEE80211_CHANCTX_SHARED);
-	mutex_unlock(&local->iflist_mtx);
 	if (err)
-		return err;
+		goto out_unlock;
 
 	timeout = msecs_to_jiffies(IEEE80211_DFS_MIN_CAC_TIME_MS);
 	ieee80211_queue_delayed_work(&sdata->local->hw,
 				     &sdata->dfs_cac_timer_work, timeout);
 
-	return 0;
+ out_unlock:
+	mutex_unlock(&local->mtx);
+	return err;
 }
 
 static struct cfg80211_beacon_data *
@@ -2998,7 +3004,9 @@ void ieee80211_csa_finalize_work(struct work_struct *work)
 		goto unlock;
 
 	sdata->radar_required = sdata->csa_radar_required;
+	mutex_lock(&local->mtx);
 	err = ieee80211_vif_change_channel(sdata, &changed);
+	mutex_unlock(&local->mtx);
 	if (WARN_ON(err < 0))
 		goto unlock;
 
@@ -3047,8 +3055,8 @@ unlock:
 	sdata_unlock(sdata);
 }
 
-static int ieee80211_channel_switch(struct wiphy *wiphy, struct net_device *dev,
-				    struct cfg80211_csa_settings *params)
+int ieee80211_channel_switch(struct wiphy *wiphy, struct net_device *dev,
+			     struct cfg80211_csa_settings *params)
 {
 	struct ieee80211_sub_if_data *sdata = IEEE80211_DEV_TO_SUB_IF(dev);
 	struct ieee80211_local *local = sdata->local;
@@ -3829,6 +3837,31 @@ static void ieee80211_set_wakeup(struct wiphy *wiphy, bool enabled)
 }
 #endif
 
+static int ieee80211_set_qos_map(struct wiphy *wiphy,
+				 struct net_device *dev,
+				 struct cfg80211_qos_map *qos_map)
+{
+	struct ieee80211_sub_if_data *sdata = IEEE80211_DEV_TO_SUB_IF(dev);
+	struct mac80211_qos_map *new_qos_map, *old_qos_map;
+
+	if (qos_map) {
+		new_qos_map = kzalloc(sizeof(*new_qos_map), GFP_KERNEL);
+		if (!new_qos_map)
+			return -ENOMEM;
+		memcpy(&new_qos_map->qos_map, qos_map, sizeof(*qos_map));
+	} else {
+		/* A NULL qos_map was passed to disable QoS mapping */
+		new_qos_map = NULL;
+	}
+
+	old_qos_map = rtnl_dereference(sdata->qos_map);
+	rcu_assign_pointer(sdata->qos_map, new_qos_map);
+	if (old_qos_map)
+		kfree_rcu(old_qos_map, rcu_head);
+
+	return 0;
+}
+
 struct cfg80211_ops mac80211_config_ops = {
 	.add_virtual_intf = ieee80211_add_iface,
 	.del_virtual_intf = ieee80211_del_iface,
@@ -3908,4 +3941,5 @@ struct cfg80211_ops mac80211_config_ops = {
 	.get_channel = ieee80211_cfg_get_channel,
 	.start_radar_detection = ieee80211_start_radar_detection,
 	.channel_switch = ieee80211_channel_switch,
+	.set_qos_map = ieee80211_set_qos_map,
 };

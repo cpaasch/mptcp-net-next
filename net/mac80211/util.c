@@ -76,7 +76,7 @@ u8 *ieee80211_get_bssid(struct ieee80211_hdr *hdr, size_t len,
 	}
 
 	if (ieee80211_is_ctl(fc)) {
-		if(ieee80211_is_pspoll(fc))
+		if (ieee80211_is_pspoll(fc))
 			return hdr->addr1;
 
 		if (ieee80211_is_back_req(fc)) {
@@ -641,6 +641,17 @@ void ieee80211_iterate_active_interfaces_rtnl(
 	__iterate_active_interfaces(local, iter_flags, iterator, data);
 }
 EXPORT_SYMBOL_GPL(ieee80211_iterate_active_interfaces_rtnl);
+
+struct ieee80211_vif *wdev_to_ieee80211_vif(struct wireless_dev *wdev)
+{
+	struct ieee80211_sub_if_data *sdata = IEEE80211_WDEV_TO_SUB_IF(wdev);
+
+	if (!ieee80211_sdata_running(sdata) ||
+	    !(sdata->flags & IEEE80211_SDATA_IN_DRIVER))
+		return NULL;
+	return &sdata->vif;
+}
+EXPORT_SYMBOL_GPL(wdev_to_ieee80211_vif);
 
 /*
  * Nothing should have been stuffed into the workqueue during
@@ -1451,6 +1462,8 @@ int ieee80211_reconfig(struct ieee80211_local *local)
 	struct sta_info *sta;
 	int res, i;
 	bool reconfig_due_to_wowlan = false;
+	struct ieee80211_sub_if_data *sched_scan_sdata;
+	bool sched_scan_stopped = false;
 
 #ifdef CONFIG_PM
 	if (local->suspended)
@@ -1754,6 +1767,27 @@ int ieee80211_reconfig(struct ieee80211_local *local)
 #else
 	WARN_ON(1);
 #endif
+
+	/*
+	 * Reconfigure sched scan if it was interrupted by FW restart or
+	 * suspend.
+	 */
+	mutex_lock(&local->mtx);
+	sched_scan_sdata = rcu_dereference_protected(local->sched_scan_sdata,
+						lockdep_is_held(&local->mtx));
+	if (sched_scan_sdata && local->sched_scan_req)
+		/*
+		 * Sched scan stopped, but we don't want to report it. Instead,
+		 * we're trying to reschedule.
+		 */
+		if (__ieee80211_request_sched_scan_start(sched_scan_sdata,
+							 local->sched_scan_req))
+			sched_scan_stopped = true;
+	mutex_unlock(&local->mtx);
+
+	if (sched_scan_stopped)
+		cfg80211_sched_scan_stopped(local->hw.wiphy);
+
 	return 0;
 }
 
@@ -2281,9 +2315,14 @@ void ieee80211_dfs_cac_cancel(struct ieee80211_local *local)
 	struct ieee80211_sub_if_data *sdata;
 	struct cfg80211_chan_def chandef;
 
+	mutex_lock(&local->mtx);
 	mutex_lock(&local->iflist_mtx);
 	list_for_each_entry(sdata, &local->interfaces, list) {
-		cancel_delayed_work_sync(&sdata->dfs_cac_timer_work);
+		/* it might be waiting for the local->mtx, but then
+		 * by the time it gets it, sdata->wdev.cac_started
+		 * will no longer be true
+		 */
+		cancel_delayed_work(&sdata->dfs_cac_timer_work);
 
 		if (sdata->wdev.cac_started) {
 			chandef = sdata->vif.bss_conf.chandef;
@@ -2295,6 +2334,7 @@ void ieee80211_dfs_cac_cancel(struct ieee80211_local *local)
 		}
 	}
 	mutex_unlock(&local->iflist_mtx);
+	mutex_unlock(&local->mtx);
 }
 
 void ieee80211_dfs_radar_detected_work(struct work_struct *work)
@@ -2554,3 +2594,143 @@ int ieee80211_cs_headroom(struct ieee80211_local *local,
 
 	return headroom;
 }
+
+static bool
+ieee80211_extend_noa_desc(struct ieee80211_noa_data *data, u32 tsf, int i)
+{
+	s32 end = data->desc[i].start + data->desc[i].duration - (tsf + 1);
+	int skip;
+
+	if (end > 0)
+		return false;
+
+	/* End time is in the past, check for repetitions */
+	skip = DIV_ROUND_UP(-end, data->desc[i].interval);
+	if (data->count[i] < 255) {
+		if (data->count[i] <= skip) {
+			data->count[i] = 0;
+			return false;
+		}
+
+		data->count[i] -= skip;
+	}
+
+	data->desc[i].start += skip * data->desc[i].interval;
+
+	return true;
+}
+
+static bool
+ieee80211_extend_absent_time(struct ieee80211_noa_data *data, u32 tsf,
+			     s32 *offset)
+{
+	bool ret = false;
+	int i;
+
+	for (i = 0; i < IEEE80211_P2P_NOA_DESC_MAX; i++) {
+		s32 cur;
+
+		if (!data->count[i])
+			continue;
+
+		if (ieee80211_extend_noa_desc(data, tsf + *offset, i))
+			ret = true;
+
+		cur = data->desc[i].start - tsf;
+		if (cur > *offset)
+			continue;
+
+		cur = data->desc[i].start + data->desc[i].duration - tsf;
+		if (cur > *offset)
+			*offset = cur;
+	}
+
+	return ret;
+}
+
+static u32
+ieee80211_get_noa_absent_time(struct ieee80211_noa_data *data, u32 tsf)
+{
+	s32 offset = 0;
+	int tries = 0;
+	/*
+	 * arbitrary limit, used to avoid infinite loops when combined NoA
+	 * descriptors cover the full time period.
+	 */
+	int max_tries = 5;
+
+	ieee80211_extend_absent_time(data, tsf, &offset);
+	do {
+		if (!ieee80211_extend_absent_time(data, tsf, &offset))
+			break;
+
+		tries++;
+	} while (tries < max_tries);
+
+	return offset;
+}
+
+void ieee80211_update_p2p_noa(struct ieee80211_noa_data *data, u32 tsf)
+{
+	u32 next_offset = BIT(31) - 1;
+	int i;
+
+	data->absent = 0;
+	data->has_next_tsf = false;
+	for (i = 0; i < IEEE80211_P2P_NOA_DESC_MAX; i++) {
+		s32 start;
+
+		if (!data->count[i])
+			continue;
+
+		ieee80211_extend_noa_desc(data, tsf, i);
+		start = data->desc[i].start - tsf;
+		if (start <= 0)
+			data->absent |= BIT(i);
+
+		if (next_offset > start)
+			next_offset = start;
+
+		data->has_next_tsf = true;
+	}
+
+	if (data->absent)
+		next_offset = ieee80211_get_noa_absent_time(data, tsf);
+
+	data->next_tsf = tsf + next_offset;
+}
+EXPORT_SYMBOL(ieee80211_update_p2p_noa);
+
+int ieee80211_parse_p2p_noa(const struct ieee80211_p2p_noa_attr *attr,
+			    struct ieee80211_noa_data *data, u32 tsf)
+{
+	int ret = 0;
+	int i;
+
+	memset(data, 0, sizeof(*data));
+
+	for (i = 0; i < IEEE80211_P2P_NOA_DESC_MAX; i++) {
+		const struct ieee80211_p2p_noa_desc *desc = &attr->desc[i];
+
+		if (!desc->count || !desc->duration)
+			continue;
+
+		data->count[i] = desc->count;
+		data->desc[i].start = le32_to_cpu(desc->start_time);
+		data->desc[i].duration = le32_to_cpu(desc->duration);
+		data->desc[i].interval = le32_to_cpu(desc->interval);
+
+		if (data->count[i] > 1 &&
+		    data->desc[i].interval < data->desc[i].duration)
+			continue;
+
+		ieee80211_extend_noa_desc(data, tsf, i);
+		ret++;
+	}
+
+	if (ret)
+		ieee80211_update_p2p_noa(data, tsf);
+
+	return ret;
+}
+EXPORT_SYMBOL(ieee80211_parse_p2p_noa);

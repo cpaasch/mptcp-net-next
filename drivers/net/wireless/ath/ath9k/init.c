@@ -470,7 +470,6 @@ static int ath9k_init_queues(struct ath_softc *sc)
 
 	sc->beacon.beaconq = ath9k_hw_beaconq_setup(sc->sc_ah);
 	sc->beacon.cabq = ath_txq_setup(sc, ATH9K_TX_QUEUE_CAB, 0);
-
 	ath_cabq_update(sc);
 
 	sc->tx.uapsdq = ath_txq_setup(sc, ATH9K_TX_QUEUE_UAPSD, 0);
@@ -705,7 +704,6 @@ static int ath9k_init_softc(u16 devid, struct ath_softc *sc,
 	ah->reg_ops.read = ath9k_ioread32;
 	ah->reg_ops.write = ath9k_iowrite32;
 	ah->reg_ops.rmw = ath9k_reg_rmw;
-	atomic_set(&ah->intr_ref_cnt, -1);
 	sc->sc_ah = ah;
 	pCap = &ah->caps;
 
@@ -765,10 +763,8 @@ static int ath9k_init_softc(u16 devid, struct ath_softc *sc,
 
 	setup_timer(&sc->sleep_timer, ath_ps_full_sleep, (unsigned long)sc);
 	INIT_WORK(&sc->hw_reset_work, ath_reset_work);
-	INIT_WORK(&sc->hw_check_work, ath_hw_check);
 	INIT_WORK(&sc->paprd_work, ath_paprd_calibrate);
 	INIT_DELAYED_WORK(&sc->hw_pll_work, ath_hw_pll_work);
-	setup_timer(&sc->rx_poll_timer, ath_rx_poll, (unsigned long)sc);
 
 	/*
 	 * Cache line size is used to size and align various
@@ -899,7 +895,7 @@ static const struct ieee80211_iface_combination if_comb[] = {
 	}
 };
 
-void ath9k_set_hw_capab(struct ath_softc *sc, struct ieee80211_hw *hw)
+static void ath9k_set_hw_capab(struct ath_softc *sc, struct ieee80211_hw *hw)
 {
 	struct ath_hw *ah = sc->sc_ah;
 	struct ath_common *common = ath9k_hw_common(ah);

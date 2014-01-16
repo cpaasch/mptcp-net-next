@@ -1163,6 +1163,19 @@ static inline bool ieee80211_vif_is_mesh(struct ieee80211_vif *vif)
 }
 
 /**
+ * wdev_to_ieee80211_vif - return a vif struct from a wdev
+ * @wdev: the wdev to get the vif for
+ *
+ * This can be used by mac80211 drivers with direct cfg80211 APIs
+ * (like the vendor commands) that get a wdev.
+ *
+ * Note that this function may return %NULL if the given wdev isn't
+ * associated with a vif that the driver knows about (e.g. monitor
+ * or AP_VLAN interfaces.)
+ */
+struct ieee80211_vif *wdev_to_ieee80211_vif(struct wireless_dev *wdev);
+
+/**
  * enum ieee80211_key_flags - key flags
  *
  * These flags are used for communication about keys between the driver
@@ -1600,6 +1613,9 @@ enum ieee80211_hw_flags {
  * @extra_tx_headroom: headroom to reserve in each transmit skb
  *	for use by the driver (e.g. for transmit headers.)
  *
+ * @extra_beacon_tailroom: tailroom to reserve in each beacon tx skb.
+ *	Can be used by drivers to add extra IEs.
+ *
  * @channel_change_time: time (in microseconds) it takes to change channels.
  *
  * @max_signal: Maximum value for signal (rssi) in RX information, used
@@ -1682,6 +1698,7 @@ struct ieee80211_hw {
 	void *priv;
 	u32 flags;
 	unsigned int extra_tx_headroom;
+	unsigned int extra_beacon_tailroom;
 	int channel_change_time;
 	int vif_data_size;
 	int sta_data_size;
@@ -2398,9 +2415,6 @@ enum ieee80211_roc_type {
  *	See the section "Frame filtering" for more information.
  *	This callback must be implemented and can sleep.
  *
- * @set_multicast_list: Configure the device's interface specific RX multicast
- *	filter. This callback is optional. This callback must be atomic.
- *
  * @set_tim: Set TIM bit. mac80211 calls this function when a TIM bit
  * 	must be set or cleared for a given STA. Must be atomic.
  *
@@ -2485,7 +2499,11 @@ enum ieee80211_roc_type {
  *	AP, IBSS/WDS/mesh peer etc. This callback can sleep.
  *
  * @sta_remove: Notifies low level driver about removal of an associated
- *	station, AP, IBSS/WDS/mesh peer etc. This callback can sleep.
+ *	station, AP, IBSS/WDS/mesh peer etc. Note that after the callback
+ *	returns it isn't safe to use the pointer, not even RCU protected;
+ *	no RCU grace period is guaranteed between returning here and freeing
+ *	the station. See @sta_pre_rcu_remove if needed.
+ *	This callback can sleep.
  *
  * @sta_add_debugfs: Drivers can use this callback to add debugfs files
  *	when a station is added to mac80211's station list. This callback
@@ -2504,7 +2522,17 @@ enum ieee80211_roc_type {
  *	station (which can be the AP, a client, IBSS/WDS/mesh peer etc.)
  *	This callback is mutually exclusive with @sta_add/@sta_remove.
  *	It must not fail for down transitions but may fail for transitions
- *	up the list of states.
+ *	up the list of states. Also note that after the callback returns it
+ *	isn't safe to use the pointer, not even RCU protected - no RCU grace
+ *	period is guaranteed between returning here and freeing the station.
+ *	See @sta_pre_rcu_remove if needed.
+ *	The callback can sleep.
+ *
+ * @sta_pre_rcu_remove: Notify driver about station removal before RCU
+ *	synchronisation. This is useful if a driver needs to have station
+ *	pointers protected using RCU, it can then use this call to clear
+ *	the pointers instead of waiting for an RCU grace period to elapse
+ *	in @sta_state.
  *	The callback can sleep.
  *
  * @sta_rc_update: Notifies the driver of changes to the bitrates that can be
@@ -2764,10 +2792,6 @@ struct ieee80211_ops {
 				 unsigned int changed_flags,
 				 unsigned int *total_flags,
 				 u64 multicast);
-	void (*set_multicast_list)(struct ieee80211_hw *hw,
-				   struct ieee80211_vif *vif, bool allmulti,
-				   struct netdev_hw_addr_list *mc_list);
-
 	int (*set_tim)(struct ieee80211_hw *hw, struct ieee80211_sta *sta,
 		       bool set);
 	int (*set_key)(struct ieee80211_hw *hw, enum set_key_cmd cmd,
@@ -2821,6 +2845,9 @@ struct ieee80211_ops {
 			 struct ieee80211_sta *sta,
 			 enum ieee80211_sta_state old_state,
 			 enum ieee80211_sta_state new_state);
+	void (*sta_pre_rcu_remove)(struct ieee80211_hw *hw,
+				   struct ieee80211_vif *vif,
+				   struct ieee80211_sta *sta);
 	void (*sta_rc_update)(struct ieee80211_hw *hw,
 			      struct ieee80211_vif *vif,
 			      struct ieee80211_sta *sta,
@@ -4624,5 +4651,52 @@ void ieee80211_report_wowlan_wakeup(struct ieee80211_vif *vif,
 bool ieee80211_tx_prepare_skb(struct ieee80211_hw *hw,
 			      struct ieee80211_vif *vif, struct sk_buff *skb,
 			      int band, struct ieee80211_sta **sta);
+
+/**
+ * struct ieee80211_noa_data - holds temporary data for tracking P2P NoA state
+ *
+ * @next_tsf: TSF timestamp of the next absent state change
+ * @has_next_tsf: next absent state change event pending
+ *
+ * @absent: descriptor bitmask, set if GO is currently absent
+ *
+ * private:
+ *
+ * @count: count fields from the NoA descriptors
+ * @desc: adjusted data from the NoA
+ */
+struct ieee80211_noa_data {
+	u32 next_tsf;
+	bool has_next_tsf;
+
+	u8 absent;
+
+	u8 count[IEEE80211_P2P_NOA_DESC_MAX];
+	struct {
+		u32 start;
+		u32 duration;
+		u32 interval;
+	} desc[IEEE80211_P2P_NOA_DESC_MAX];
+};
+
+/**
+ * ieee80211_parse_p2p_noa - initialize NoA tracking data from P2P IE
+ *
+ * @attr: P2P NoA IE
+ * @data: NoA tracking data
+ * @tsf: current TSF timestamp
+ *
+ * Return: number of successfully parsed descriptors
+ */
+int ieee80211_parse_p2p_noa(const struct ieee80211_p2p_noa_attr *attr,
+			    struct ieee80211_noa_data *data, u32 tsf);
+
+/**
+ * ieee80211_update_p2p_noa - get next pending P2P GO absent state change
+ *
+ * @data: NoA tracking data
+ * @tsf: current TSF timestamp
+ */
+void ieee80211_update_p2p_noa(struct ieee80211_noa_data *data, u32 tsf);
 
 #endif /* MAC80211_H */

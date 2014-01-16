@@ -239,6 +239,7 @@ struct ip6_flowlabel {
 #define IPV6_FLOWINFO_MASK	cpu_to_be32(0x0FFFFFFF)
 #define IPV6_FLOWLABEL_MASK	cpu_to_be32(0x000FFFFF)
 #define IPV6_TCLASS_MASK (IPV6_FLOWINFO_MASK & ~IPV6_FLOWLABEL_MASK)
+#define IPV6_TCLASS_SHIFT	20
 
 struct ipv6_fl_socklist {
 	struct ipv6_fl_socklist	__rcu	*next;
@@ -266,9 +267,6 @@ void icmpv6_notify(struct sk_buff *skb, u8 type, u8 code, __be32 info);
 
 int icmpv6_push_pending_frames(struct sock *sk, struct flowi6 *fl6,
 			       struct icmp6hdr *thdr, int len);
-
-struct dst_entry *icmpv6_route_lookup(struct net *net, struct sk_buff *skb,
-				      struct sock *sk, struct flowi6 *fl6);
 
 int ip6_ra_control(struct sock *sk, int sel);
 
@@ -684,6 +682,10 @@ static inline __be32 ip6_flowlabel(const struct ipv6hdr *hdr)
 	return *(__be32 *)hdr & IPV6_FLOWLABEL_MASK;
 }
 
+static inline u8 ip6_tclass(__be32 flowinfo)
+{
+	return ntohl(flowinfo & IPV6_TCLASS_MASK) >> IPV6_TCLASS_SHIFT;
+}
 /*
  *	Prototypes exported by ipv6
  */
@@ -839,7 +841,6 @@ static inline int snmp6_unregister_dev(struct inet6_dev *idev) { return 0; }
 
 #ifdef CONFIG_SYSCTL
 extern struct ctl_table ipv6_route_table_template[];
-extern struct ctl_table ipv6_icmp_table_template[];
 
 struct ctl_table *ipv6_icmp_sysctl_init(struct net *net);
 struct ctl_table *ipv6_route_sysctl_init(struct net *net);

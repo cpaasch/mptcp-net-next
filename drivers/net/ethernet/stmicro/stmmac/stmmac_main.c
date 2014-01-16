@@ -64,7 +64,7 @@ static int debug = -1;
 module_param(debug, int, S_IRUGO | S_IWUSR);
 MODULE_PARM_DESC(debug, "Message Level (-1: default, 0: no output, 16: all)");
 
-int phyaddr = -1;
+static int phyaddr = -1;
 module_param(phyaddr, int, S_IRUGO);
 MODULE_PARM_DESC(phyaddr, "Physical device address");
 
@@ -622,17 +622,15 @@ static int stmmac_init_ptp(struct stmmac_priv *priv)
 	if (!(priv->dma_cap.time_stamp || priv->dma_cap.atime_stamp))
 		return -EOPNOTSUPP;
 
-	if (netif_msg_hw(priv)) {
-		if (priv->dma_cap.time_stamp) {
-			pr_debug("IEEE 1588-2002 Time Stamp supported\n");
-			priv->adv_ts = 0;
-		}
-		if (priv->dma_cap.atime_stamp && priv->extend_desc) {
-			pr_debug
-			    ("IEEE 1588-2008 Advanced Time Stamp supported\n");
-			priv->adv_ts = 1;
-		}
-	}
+	priv->adv_ts = 0;
+	if (priv->dma_cap.atime_stamp && priv->extend_desc)
+		priv->adv_ts = 1;
+
+	if (netif_msg_hw(priv) && priv->dma_cap.time_stamp)
+		pr_debug("IEEE 1588-2002 Time Stamp supported\n");
+
+	if (netif_msg_hw(priv) && priv->adv_ts)
+		pr_debug("IEEE 1588-2008 Advanced Time Stamp supported\n");
 
 	priv->hw->ptp = &stmmac_ptp;
 	priv->hwts_tx_en = 0;
@@ -1953,6 +1951,23 @@ static netdev_tx_t stmmac_xmit(struct sk_buff *skb, struct net_device *dev)
 	return NETDEV_TX_OK;
 }
 
+static void stmmac_rx_vlan(struct net_device *dev, struct sk_buff *skb)
+{
+	struct ethhdr *ehdr;
+	u16 vlanid;
+
+	if ((dev->features & NETIF_F_HW_VLAN_CTAG_RX) ==
+	    NETIF_F_HW_VLAN_CTAG_RX &&
+	    !__vlan_get_tag(skb, &vlanid)) {
+		/* pop the vlan tag */
+		ehdr = (struct ethhdr *)skb->data;
+		memmove(skb->data + VLAN_HLEN, ehdr, ETH_ALEN * 2);
+		skb_pull(skb, VLAN_HLEN);
+		__vlan_hwaccel_put_tag(skb, htons(ETH_P_8021Q), vlanid);
+	}
+}
+
+
 /**
  * stmmac_rx_refill: refill used skb preallocated buffers
  * @priv: driver private structure
@@ -2103,6 +2118,8 @@ static int stmmac_rx(struct stmmac_priv *priv, int limit)
 				pr_debug("frame received (%dbytes)", frame_len);
 				print_pkt(skb->data, frame_len);
 			}
+
+			stmmac_rx_vlan(priv->dev, skb);
 
 			skb->protocol = eth_type_trans(skb, priv->dev);
 

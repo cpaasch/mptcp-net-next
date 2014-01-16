@@ -181,7 +181,7 @@ static struct qlcnic_hardware_ops qlcnic_83xx_hw_ops = {
 	.io_error_detected		= qlcnic_83xx_io_error_detected,
 	.io_slot_reset			= qlcnic_83xx_io_slot_reset,
 	.io_resume			= qlcnic_83xx_io_resume,
-
+	.get_beacon_state		= qlcnic_83xx_get_beacon_state,
 };
 
 static struct qlcnic_nic_template qlcnic_83xx_ops = {
@@ -1388,6 +1388,33 @@ out:
 	netif_device_attach(netdev);
 }
 
+void qlcnic_83xx_get_beacon_state(struct qlcnic_adapter *adapter)
+{
+	struct qlcnic_hardware_context *ahw = adapter->ahw;
+	struct qlcnic_cmd_args cmd;
+	u8 beacon_state;
+	int err = 0;
+
+	err = qlcnic_alloc_mbx_args(&cmd, adapter, QLCNIC_CMD_GET_LED_CONFIG);
+	if (!err) {
+		err = qlcnic_issue_cmd(adapter, &cmd);
+		if (!err) {
+			beacon_state = cmd.rsp.arg[4];
+			if (beacon_state == QLCNIC_BEACON_DISABLE)
+				ahw->beacon_state = QLC_83XX_BEACON_OFF;
+			else if (beacon_state == QLC_83XX_ENABLE_BEACON)
+				ahw->beacon_state = QLC_83XX_BEACON_ON;
+		}
+	} else {
+		netdev_err(adapter->netdev, "Get beacon state failed, err=%d\n",
+			   err);
+	}
+
+	qlcnic_free_mbx_args(&cmd);
+
+	return;
+}
+
 int qlcnic_83xx_config_led(struct qlcnic_adapter *adapter, u32 state,
 			   u32 beacon)
 {
@@ -1591,7 +1618,9 @@ static void qlcnic_83xx_set_interface_id_promisc(struct qlcnic_adapter *adapter,
 						 u32 *interface_id)
 {
 	if (qlcnic_sriov_pf_check(adapter)) {
+		qlcnic_alloc_lb_filters_mem(adapter);
 		qlcnic_pf_set_interface_id_promisc(adapter, interface_id);
+		adapter->rx_mac_learn = 1;
 	} else {
 		if (!qlcnic_sriov_vf_check(adapter))
 			*interface_id = adapter->recv_ctx->context_id << 16;
@@ -1618,6 +1647,10 @@ int qlcnic_83xx_nic_set_promisc(struct qlcnic_adapter *adapter, u32 mode)
 
 	cmd->type = QLC_83XX_MBX_CMD_NO_WAIT;
 	qlcnic_83xx_set_interface_id_promisc(adapter, &temp);
+
+	if (qlcnic_84xx_check(adapter) && qlcnic_sriov_pf_check(adapter))
+		mode = VPORT_MISS_MODE_ACCEPT_ALL;
+
 	cmd->req.arg[1] = mode | temp;
 	err = qlcnic_issue_cmd(adapter, cmd);
 	if (!err)
@@ -1684,12 +1717,6 @@ int qlcnic_83xx_loopback_test(struct net_device *netdev, u8 mode)
 			goto free_diag_res;
 		}
 	} while ((adapter->ahw->linkup && ahw->has_link_events) != 1);
-
-	/* Make sure carrier is off and queue is stopped during loopback */
-	if (netif_running(netdev)) {
-		netif_carrier_off(netdev);
-		netif_tx_stop_all_queues(netdev);
-	}
 
 	ret = qlcnic_do_lb_test(adapter, mode);
 
@@ -2122,6 +2149,7 @@ static void qlcnic_83xx_handle_link_aen(struct qlcnic_adapter *adapter,
 	ahw->link_autoneg = MSB(MSW(data[3]));
 	ahw->module_type = MSB(LSW(data[3]));
 	ahw->has_link_events = 1;
+	ahw->lb_mode = data[4] & QLCNIC_LB_MODE_MASK;
 	qlcnic_advert_link_change(adapter, link_status);
 }
 

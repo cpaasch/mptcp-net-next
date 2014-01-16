@@ -37,7 +37,6 @@
 #include <net/tc_act/tc_csum.h>
 
 #define CSUM_TAB_MASK 15
-static u32 csum_idx_gen;
 static struct tcf_hashinfo csum_hash_info;
 
 static const struct nla_policy csum_policy[TCA_CSUM_MAX + 1] = {
@@ -67,19 +66,19 @@ static int tcf_csum_init(struct net *n, struct nlattr *nla, struct nlattr *est,
 	pc = tcf_hash_check(parm->index, a, bind, &csum_hash_info);
 	if (!pc) {
 		pc = tcf_hash_create(parm->index, est, a, sizeof(*p), bind,
-				     &csum_idx_gen, &csum_hash_info);
+				     &csum_hash_info);
 		if (IS_ERR(pc))
 			return PTR_ERR(pc);
-		p = to_tcf_csum(pc);
 		ret = ACT_P_CREATED;
 	} else {
-		p = to_tcf_csum(pc);
-		if (!ovr) {
-			tcf_hash_release(pc, bind, &csum_hash_info);
+		if (bind)/* dont override defaults */
+			return 0;
+		tcf_hash_release(pc, bind, &csum_hash_info);
+		if (!ovr)
 			return -EEXIST;
-		}
 	}
 
+	p = to_tcf_csum(pc);
 	spin_lock_bh(&p->tcf_lock);
 	p->tcf_action = parm->action;
 	p->update_flags = parm->update_flags;

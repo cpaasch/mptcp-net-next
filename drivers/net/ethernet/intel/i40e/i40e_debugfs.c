@@ -1,7 +1,7 @@
 /*******************************************************************************
  *
  * Intel Ethernet Controller XL710 Family Linux Driver
- * Copyright(c) 2013 Intel Corporation.
+ * Copyright(c) 2013 - 2014 Intel Corporation.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU General Public License,
@@ -12,9 +12,8 @@
  * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
  * more details.
  *
- * You should have received a copy of the GNU General Public License along with
- * this program; if not, write to the Free Software Foundation, Inc.,
- * 51 Franklin St - Fifth Floor, Boston, MA 02110-1301 USA.
+ * You should have received a copy of the GNU General Public License along
+ * with this program.  If not, see <http://www.gnu.org/licenses/>.
  *
  * The full GNU General Public License is included in this distribution in
  * the file called "COPYING".
@@ -192,12 +191,12 @@ static ssize_t i40e_dbg_dump_write(struct file *filp,
 
 			len = (sizeof(struct i40e_aq_desc)
 					* pf->hw.aq.num_asq_entries);
-			memcpy(p, pf->hw.aq.asq.desc, len);
+			memcpy(p, pf->hw.aq.asq.desc_buf.va, len);
 			p += len;
 
 			len = (sizeof(struct i40e_aq_desc)
 					* pf->hw.aq.num_arq_entries);
-			memcpy(p, pf->hw.aq.arq.desc, len);
+			memcpy(p, pf->hw.aq.arq.desc_buf.va, len);
 			p += len;
 
 			i40e_dbg_dump_data_len = buflen;
@@ -516,10 +515,10 @@ static void i40e_dbg_dump_vsi_seid(struct i40e_pf *pf, int seid)
 			 rx_ring->stats.bytes,
 			 rx_ring->rx_stats.non_eop_descs);
 		dev_info(&pf->pdev->dev,
-			 "    rx_rings[%i]: rx_stats: alloc_rx_page_failed = %lld, alloc_rx_buff_failed = %lld\n",
+			 "    rx_rings[%i]: rx_stats: alloc_page_failed = %lld, alloc_buff_failed = %lld\n",
 			 i,
-			 rx_ring->rx_stats.alloc_rx_page_failed,
-			rx_ring->rx_stats.alloc_rx_buff_failed);
+			 rx_ring->rx_stats.alloc_page_failed,
+			 rx_ring->rx_stats.alloc_buff_failed);
 		dev_info(&pf->pdev->dev,
 			 "    rx_rings[%i]: size = %i, dma = 0x%08lx\n",
 			 i, rx_ring->size,
@@ -533,6 +532,7 @@ static void i40e_dbg_dump_vsi_seid(struct i40e_pf *pf, int seid)
 		struct i40e_ring *tx_ring = ACCESS_ONCE(vsi->tx_rings[i]);
 		if (!tx_ring)
 			continue;
+
 		dev_info(&pf->pdev->dev,
 			 "    tx_rings[%i]: desc = %p\n",
 			 i, tx_ring->desc);
@@ -1083,7 +1083,7 @@ static ssize_t i40e_dbg_command_write(struct file *filp,
 		vsi = i40e_dbg_find_vsi(pf, vsi_seid);
 		if (!vsi) {
 			dev_info(&pf->pdev->dev,
-				 "add relay: vsi VSI %d not found\n", vsi_seid);
+				 "add relay: VSI %d not found\n", vsi_seid);
 			goto command_write_done;
 		}
 
@@ -1522,6 +1522,118 @@ static ssize_t i40e_dbg_command_write(struct file *filp,
 		} else {
 			dev_info(&pf->pdev->dev, "clear_stats vsi [seid] or clear_stats pf\n");
 		}
+	} else if (strncmp(cmd_buf, "send aq_cmd", 11) == 0) {
+		struct i40e_aq_desc *desc;
+		i40e_status ret;
+
+		desc = kzalloc(sizeof(struct i40e_aq_desc), GFP_KERNEL);
+		if (!desc)
+			goto command_write_done;
+		cnt = sscanf(&cmd_buf[11],
+			     "%hx %hx %hx %hx %x %x %x %x %x %x",
+			     &desc->flags,
+			     &desc->opcode, &desc->datalen, &desc->retval,
+			     &desc->cookie_high, &desc->cookie_low,
+			     &desc->params.internal.param0,
+			     &desc->params.internal.param1,
+			     &desc->params.internal.param2,
+			     &desc->params.internal.param3);
+		if (cnt != 10) {
+			dev_info(&pf->pdev->dev,
+				 "send aq_cmd: bad command string, cnt=%d\n",
+				 cnt);
+			kfree(desc);
+			desc = NULL;
+			goto command_write_done;
+		}
+		ret = i40e_asq_send_command(&pf->hw, desc, NULL, 0, NULL);
+		if (!ret) {
+			dev_info(&pf->pdev->dev, "AQ command sent Status : Success\n");
+		} else if (ret == I40E_ERR_ADMIN_QUEUE_ERROR) {
+			dev_info(&pf->pdev->dev,
+				 "AQ command send failed Opcode %x AQ Error: %d\n",
+				 desc->opcode, pf->hw.aq.asq_last_status);
+		} else {
+			dev_info(&pf->pdev->dev,
+				 "AQ command send failed Opcode %x Status: %d\n",
+				 desc->opcode, ret);
+		}
+		dev_info(&pf->pdev->dev,
+			 "AQ desc WB 0x%04x 0x%04x 0x%04x 0x%04x 0x%08x 0x%08x 0x%08x 0x%08x 0x%08x 0x%08x\n",
+			 desc->flags, desc->opcode, desc->datalen, desc->retval,
+			 desc->cookie_high, desc->cookie_low,
+			 desc->params.internal.param0,
+			 desc->params.internal.param1,
+			 desc->params.internal.param2,
+			 desc->params.internal.param3);
+		kfree(desc);
+		desc = NULL;
+	} else if (strncmp(cmd_buf, "send indirect aq_cmd", 20) == 0) {
+		struct i40e_aq_desc *desc;
+		i40e_status ret;
+		u16 buffer_len;
+		u8 *buff;
+
+		desc = kzalloc(sizeof(struct i40e_aq_desc), GFP_KERNEL);
+		if (!desc)
+			goto command_write_done;
+		cnt = sscanf(&cmd_buf[20],
+			     "%hx %hx %hx %hx %x %x %x %x %x %x %hd",
+			     &desc->flags,
+			     &desc->opcode, &desc->datalen, &desc->retval,
+			     &desc->cookie_high, &desc->cookie_low,
+			     &desc->params.internal.param0,
+			     &desc->params.internal.param1,
+			     &desc->params.internal.param2,
+			     &desc->params.internal.param3,
+			     &buffer_len);
+		if (cnt != 11) {
+			dev_info(&pf->pdev->dev,
+				 "send indirect aq_cmd: bad command string, cnt=%d\n",
+				 cnt);
+			kfree(desc);
+			desc = NULL;
+			goto command_write_done;
+		}
+		/* Just stub a buffer big enough in case user messed up */
+		if (buffer_len == 0)
+			buffer_len = 1280;
+
+		buff = kzalloc(buffer_len, GFP_KERNEL);
+		if (!buff) {
+			kfree(desc);
+			desc = NULL;
+			goto command_write_done;
+		}
+		desc->flags |= cpu_to_le16((u16)I40E_AQ_FLAG_BUF);
+		ret = i40e_asq_send_command(&pf->hw, desc, buff,
+					    buffer_len, NULL);
+		if (!ret) {
+			dev_info(&pf->pdev->dev, "AQ command sent Status : Success\n");
+		} else if (ret == I40E_ERR_ADMIN_QUEUE_ERROR) {
+			dev_info(&pf->pdev->dev,
+				 "AQ command send failed Opcode %x AQ Error: %d\n",
+				 desc->opcode, pf->hw.aq.asq_last_status);
+		} else {
+			dev_info(&pf->pdev->dev,
+				 "AQ command send failed Opcode %x Status: %d\n",
+				 desc->opcode, ret);
+		}
+		dev_info(&pf->pdev->dev,
+			 "AQ desc WB 0x%04x 0x%04x 0x%04x 0x%04x 0x%08x 0x%08x 0x%08x 0x%08x 0x%08x 0x%08x\n",
+			 desc->flags, desc->opcode, desc->datalen, desc->retval,
+			 desc->cookie_high, desc->cookie_low,
+			 desc->params.internal.param0,
+			 desc->params.internal.param1,
+			 desc->params.internal.param2,
+			 desc->params.internal.param3);
+		print_hex_dump(KERN_INFO, "AQ buffer WB: ",
+			       DUMP_PREFIX_OFFSET, 16, 1,
+			       buff, buffer_len, true);
+		kfree(buff);
+		buff = NULL;
+		kfree(desc);
+		desc = NULL;
 	} else if ((strncmp(cmd_buf, "add fd_filter", 13) == 0) ||
 		   (strncmp(cmd_buf, "rem fd_filter", 13) == 0)) {
 		struct i40e_fdir_data fd_data;
@@ -1740,10 +1852,10 @@ static ssize_t i40e_dbg_command_write(struct file *filp,
 			dev_info(&pf->pdev->dev,
 				 "Read NVM module=0x%x offset=0x%x words=%d\n",
 				 module, offset, buffer_len);
-			if (buffer_len)
+			if (bytes)
 				print_hex_dump(KERN_INFO, "NVM Dump: ",
 					DUMP_PREFIX_OFFSET, 16, 2,
-					buff, buffer_len, true);
+					buff, bytes, true);
 		}
 		kfree(buff);
 		buff = NULL;
@@ -1773,6 +1885,8 @@ static ssize_t i40e_dbg_command_write(struct file *filp,
 		dev_info(&pf->pdev->dev, "  pfr\n");
 		dev_info(&pf->pdev->dev, "  corer\n");
 		dev_info(&pf->pdev->dev, "  globr\n");
+		dev_info(&pf->pdev->dev, "  send aq_cmd <flags> <opcode> <datalen> <retval> <cookie_h> <cookie_l> <param0> <param1> <param2> <param3>\n");
+		dev_info(&pf->pdev->dev, "  send indirect aq_cmd <flags> <opcode> <datalen> <retval> <cookie_h> <cookie_l> <param0> <param1> <param2> <param3> <buffer_len>\n");
 		dev_info(&pf->pdev->dev, "  add fd_filter <dest q_index> <flex_off> <pctype> <dest_vsi> <dest_ctl> <fd_status> <cnt_index> <fd_id> <packet_len> <packet>\n");
 		dev_info(&pf->pdev->dev, "  rem fd_filter <dest q_index> <flex_off> <pctype> <dest_vsi> <dest_ctl> <fd_status> <cnt_index> <fd_id> <packet_len> <packet>\n");
 		dev_info(&pf->pdev->dev, "  lldp start\n");

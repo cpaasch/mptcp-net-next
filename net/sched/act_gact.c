@@ -24,13 +24,12 @@
 #include <net/tc_act/tc_gact.h>
 
 #define GACT_TAB_MASK	15
-static u32 gact_idx_gen;
 static struct tcf_hashinfo gact_hash_info;
 
 #ifdef CONFIG_GACT_PROB
 static int gact_net_rand(struct tcf_gact *gact)
 {
-	if (!gact->tcfg_pval || net_random() % gact->tcfg_pval)
+	if (!gact->tcfg_pval || prandom_u32() % gact->tcfg_pval)
 		return gact->tcf_action;
 	return gact->tcfg_paction;
 }
@@ -90,15 +89,16 @@ static int tcf_gact_init(struct net *net, struct nlattr *nla,
 	pc = tcf_hash_check(parm->index, a, bind, &gact_hash_info);
 	if (!pc) {
 		pc = tcf_hash_create(parm->index, est, a, sizeof(*gact),
-				     bind, &gact_idx_gen, &gact_hash_info);
+				     bind, &gact_hash_info);
 		if (IS_ERR(pc))
 			return PTR_ERR(pc);
 		ret = ACT_P_CREATED;
 	} else {
-		if (!ovr) {
-			tcf_hash_release(pc, bind, &gact_hash_info);
+		if (bind)/* dont override defaults */
+			return 0;
+		tcf_hash_release(pc, bind, &gact_hash_info);
+		if (!ovr)
 			return -EEXIST;
-		}
 	}
 
 	gact = to_gact(pc);

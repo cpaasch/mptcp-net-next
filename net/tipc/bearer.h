@@ -161,8 +161,7 @@ extern struct tipc_bearer tipc_bearers[];
  * TIPC routines available to supported media types
  */
 
-void tipc_recv_msg(struct sk_buff *buf, struct tipc_bearer *tb_ptr);
-
+void tipc_rcv(struct sk_buff *buf, struct tipc_bearer *tb_ptr);
 int tipc_enable_bearer(const char *bearer_name, u32 disc_domain, u32 priority);
 int tipc_disable_bearer(const char *name);
 
@@ -190,7 +189,6 @@ struct sk_buff *tipc_bearer_get_names(void);
 void tipc_bearer_add_dest(struct tipc_bearer *b_ptr, u32 dest);
 void tipc_bearer_remove_dest(struct tipc_bearer *b_ptr, u32 dest);
 struct tipc_bearer *tipc_bearer_find(const char *name);
-struct tipc_bearer *tipc_bearer_find_interface(const char *if_name);
 struct tipc_media *tipc_media_find(const char *name);
 int tipc_bearer_setup(void);
 void tipc_bearer_cleanup(void);
