@@ -1122,16 +1122,17 @@ void tcp_adjust_pcount(struct sock *sk, const struct sk_buff *skb, int decr)
  * Remember, these are still headerless SKBs at this point.
  */
 int tcp_fragment(struct sock *sk, struct sk_buff *skb, u32 len,
-		 unsigned int mss_now)
+		 unsigned int mss_now, bool reinject)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
 	struct sk_buff *buff;
 	int nsize, old_factor;
 	int nlen;
 	u8 flags;
-
-	if (tcp_sk(sk)->mpc && mptcp_is_data_seq(skb))
-		mptcp_fragment(sk, skb, len, mss_now, 0);
+	const int dss_len = MPTCP_SUB_LEN_DSS_ALIGN + MPTCP_SUB_LEN_ACK_ALIGN +
+				MPTCP_SUB_LEN_SEQ_ALIGN;
+	char dss[dss_len];
+	bool is_mptcp = tcp_sk(sk)->mpc && mptcp_is_data_seq(skb);
 
 	if (WARN_ON(len > skb->len))
 		return -EINVAL;
@@ -1140,16 +1141,34 @@ int tcp_fragment(struct sock *sk, struct sk_buff *skb, u32 len,
 	if (nsize < 0)
 		nsize = 0;
 
-	if (skb_unclone(skb, GFP_ATOMIC))
-		return -ENOMEM;
+	/* Save DSS-option for further use. */
+	if (is_mptcp && !is_meta_sk(sk))
+		memcpy(dss, skb->data - dss_len, dss_len);
+
+	/* Reallocate header if skb is a clone. */
+	if (skb_cloned(skb)) {
+		if (pskb_expand_head(skb, 0, 0, GFP_ATOMIC))
+			return -ENOMEM;
+
+		if (is_mptcp && !is_meta_sk(sk)) {
+			/* Recover DSS-option into the new header. */
+			memcpy(skb->data - dss_len, dss, dss_len);
+		}
+	}
 
 	/* Get a new skb... force flag on. */
 	buff = sk_stream_alloc_skb(sk, nsize, GFP_ATOMIC);
 	if (buff == NULL)
 		return -ENOMEM; /* We'll just try again later. */
 
-	sk->sk_wmem_queued += buff->truesize;
-	sk_mem_charge(sk, buff->truesize);
+	/* Check if buff will be added to the reinject-queue, in which case skip
+	 * the wmem queue.
+	 */
+	if (!reinject) {
+		sk->sk_wmem_queued += buff->truesize;
+		sk_mem_charge(sk, buff->truesize);
+	}
+
 	nlen = skb->len - len - nsize;
 	buff->truesize += nlen;
 	skb->truesize -= nlen;
@@ -1165,6 +1184,13 @@ int tcp_fragment(struct sock *sk, struct sk_buff *skb, u32 len,
 	TCP_SKB_CB(buff)->tcp_flags = flags;
 	TCP_SKB_CB(buff)->sacked = TCP_SKB_CB(skb)->sacked;
 
+	/* Set MPTCP flags. */
+	if (is_mptcp) {
+		flags = TCP_SKB_CB(skb)->mptcp_flags;
+		TCP_SKB_CB(skb)->mptcp_flags = flags & ~(MPTCPHDR_FIN);
+		TCP_SKB_CB(buff)->mptcp_flags = flags;
+	}
+
 	if (!skb_shinfo(skb)->nr_frags && skb->ip_summed != CHECKSUM_PARTIAL) {
 		/* Copy and checksum data tail into the new buffer. */
 		buff->csum = csum_partial_copy_nocheck(skb->data + len,
@@ -1178,6 +1204,10 @@ int tcp_fragment(struct sock *sk, struct sk_buff *skb, u32 len,
 		skb->ip_summed = CHECKSUM_PARTIAL;
 		skb_split(skb, buff, len);
 	}
+
+	/* We lost the dss-option when creating buff - put it back! */
+	if (is_mptcp && !is_meta_sk(sk))
+		memcpy(buff->data - dss_len, dss, dss_len);
 
 	buff->ip_summed = skb->ip_summed;
 
@@ -1196,7 +1226,7 @@ int tcp_fragment(struct sock *sk, struct sk_buff *skb, u32 len,
 	/* If this packet has been sent out already, we must
 	 * adjust the various packet counters.
 	 */
-	if (!before(tp->snd_nxt, TCP_SKB_CB(buff)->end_seq)) {
+	if (!before(tp->snd_nxt, TCP_SKB_CB(buff)->end_seq) && !reinject) {
 		int diff = old_factor - tcp_skb_pcount(skb) -
 			tcp_skb_pcount(buff);
 
@@ -1206,7 +1236,11 @@ int tcp_fragment(struct sock *sk, struct sk_buff *skb, u32 len,
 
 	/* Link BUFF into the send queue. */
 	skb_header_release(buff);
-	tcp_insert_write_queue_after(skb, buff, sk);
+
+	if (reinject)
+		__skb_queue_after(&tcp_sk(sk)->mpcb->reinject_queue, skb, buff);
+	else
+		tcp_insert_write_queue_after(skb, buff, sk);
 
 	return 0;
 }
@@ -1664,11 +1698,11 @@ static int tso_fragment(struct sock *sk, struct sk_buff *skb, unsigned int len,
 	u8 flags;
 
 	if (tcp_sk(sk)->mpc && mptcp_is_data_seq(skb))
-		mptso_fragment(sk, skb, len, mss_now, gfp, 0);
+		mptso_fragment(sk, skb, len, mss_now, gfp, false);
 
 	/* All of a TSO frame must be composed of paged data.  */
 	if (skb->len != skb->data_len)
-		return tcp_fragment(sk, skb, len, mss_now);
+		return tcp_fragment(sk, skb, len, mss_now, false);
 
 	buff = sk_stream_alloc_skb(sk, 0, gfp);
 	if (unlikely(buff == NULL))
@@ -2141,7 +2175,8 @@ void tcp_send_loss_probe(struct sock *sk)
 		goto rearm_timer;
 
 	if ((pcount > 1) && (skb->len > (pcount - 1) * mss)) {
-		if (unlikely(tcp_fragment(sk, skb, (pcount - 1) * mss, mss)))
+		if (unlikely(tcp_fragment(sk, skb, (pcount - 1) * mss, mss,
+			false)))
 			goto rearm_timer;
 		skb = tcp_write_queue_tail(sk);
 	}
@@ -2473,7 +2508,7 @@ int __tcp_retransmit_skb(struct sock *sk, struct sk_buff *skb)
 		return -EAGAIN;
 
 	if (skb->len > cur_mss) {
-		if (tcp_fragment(sk, skb, cur_mss, cur_mss))
+		if (tcp_fragment(sk, skb, cur_mss, cur_mss, false))
 			return -ENOMEM; /* We'll try again later. */
 	} else {
 		int oldpcount = tcp_skb_pcount(skb);
@@ -3295,7 +3330,7 @@ int tcp_write_wakeup(struct sock *sk)
 		    skb->len > mss) {
 			seg_size = min(seg_size, mss);
 			TCP_SKB_CB(skb)->tcp_flags |= TCPHDR_PSH;
-			if (tcp_fragment(sk, skb, seg_size, mss))
+			if (tcp_fragment(sk, skb, seg_size, mss, false))
 				return -1;
 		} else if (!tcp_skb_pcount(skb))
 			tcp_set_skb_tso_segs(sk, skb, mss);
