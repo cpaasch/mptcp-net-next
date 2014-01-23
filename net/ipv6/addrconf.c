@@ -1438,7 +1438,9 @@ int __ipv6_get_lladdr(struct inet6_dev *idev, struct in6_addr *addr,
 	struct inet6_ifaddr *ifp;
 	int err = -EADDRNOTAVAIL;
 
-	list_for_each_entry(ifp, &idev->addr_list, if_list) {
+	list_for_each_entry_reverse(ifp, &idev->addr_list, if_list) {
+		if (ifp->scope > IFA_LINK)
+			break;
 		if (ifp->scope == IFA_LINK &&
 		    !(ifp->flags & banned_flags)) {
 			*addr = ifp->addr;
@@ -1859,7 +1861,9 @@ static int ipv6_inherit_eui64(u8 *eui, struct inet6_dev *idev)
 	struct inet6_ifaddr *ifp;
 
 	read_lock_bh(&idev->lock);
-	list_for_each_entry(ifp, &idev->addr_list, if_list) {
+	list_for_each_entry_reverse(ifp, &idev->addr_list, if_list) {
+		if (ifp->scope > IFA_LINK)
+			break;
 		if (ifp->scope == IFA_LINK && !(ifp->flags&IFA_F_TENTATIVE)) {
 			memcpy(eui, ifp->addr.s6_addr+8, 8);
 			err = 0;
@@ -3234,6 +3238,24 @@ out:
 	in6_ifa_put(ifp);
 }
 
+/* ifp->idev must be at least read locked */
+static bool ipv6_lonely_lladdr(struct inet6_ifaddr *ifp)
+{
+	struct inet6_ifaddr *ifpiter;
+	struct inet6_dev *idev = ifp->idev;
+
+	list_for_each_entry_reverse(ifpiter, &idev->addr_list, if_list) {
+		if (ifpiter->scope > IFA_LINK)
+			break;
+		if (ifp != ifpiter && ifpiter->scope == IFA_LINK &&
+		    (ifpiter->flags & (IFA_F_PERMANENT|IFA_F_TENTATIVE|
+				       IFA_F_OPTIMISTIC|IFA_F_DADFAILED)) ==
+		    IFA_F_PERMANENT)
+			return false;
+	}
+	return true;
+}
+
 static void addrconf_dad_completed(struct inet6_ifaddr *ifp)
 {
 	struct net_device *dev = ifp->idev->dev;
@@ -3253,14 +3275,11 @@ static void addrconf_dad_completed(struct inet6_ifaddr *ifp)
 	 */
 
 	read_lock_bh(&ifp->idev->lock);
-	spin_lock(&ifp->lock);
-	send_mld = ipv6_addr_type(&ifp->addr) & IPV6_ADDR_LINKLOCAL &&
-		   ifp->idev->valid_ll_addr_cnt == 1;
+	send_mld = ifp->scope == IFA_LINK && ipv6_lonely_lladdr(ifp);
 	send_rs = send_mld &&
 		  ipv6_accept_ra(ifp->idev) &&
 		  ifp->idev->cnf.rtr_solicits > 0 &&
 		  (dev->flags&IFF_LOOPBACK) == 0;
-	spin_unlock(&ifp->lock);
 	read_unlock_bh(&ifp->idev->lock);
 
 	/* While dad is in progress mld report's source address is in6_addrany.
@@ -4599,19 +4618,6 @@ errout:
 		rtnl_set_sk_err(net, RTNLGRP_IPV6_PREFIX, err);
 }
 
-static void update_valid_ll_addr_cnt(struct inet6_ifaddr *ifp, int count)
-{
-	write_lock_bh(&ifp->idev->lock);
-	spin_lock(&ifp->lock);
-	if (((ifp->flags & (IFA_F_PERMANENT|IFA_F_TENTATIVE|IFA_F_OPTIMISTIC|
-			    IFA_F_DADFAILED)) == IFA_F_PERMANENT) &&
-	    (ipv6_addr_type(&ifp->addr) & IPV6_ADDR_LINKLOCAL))
-		ifp->idev->valid_ll_addr_cnt += count;
-	WARN_ON(ifp->idev->valid_ll_addr_cnt < 0);
-	spin_unlock(&ifp->lock);
-	write_unlock_bh(&ifp->idev->lock);
-}
-
 static void __ipv6_ifa_notify(int event, struct inet6_ifaddr *ifp)
 {
 	struct net *net = dev_net(ifp->idev->dev);
@@ -4620,8 +4626,6 @@ static void __ipv6_ifa_notify(int event, struct inet6_ifaddr *ifp)
 
 	switch (event) {
 	case RTM_NEWADDR:
-		update_valid_ll_addr_cnt(ifp, 1);
-
 		/*
 		 * If the address was optimistic
 		 * we inserted the route at the start of
@@ -4637,8 +4641,6 @@ static void __ipv6_ifa_notify(int event, struct inet6_ifaddr *ifp)
 					      ifp->idev->dev, 0, 0);
 		break;
 	case RTM_DELADDR:
-		update_valid_ll_addr_cnt(ifp, -1);
-
 		if (ifp->idev->cnf.forwarding)
 			addrconf_leave_anycast(ifp);
 		addrconf_leave_solict(ifp->idev, &ifp->addr);

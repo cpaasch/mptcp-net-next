@@ -486,6 +486,9 @@ int tcp_v6_send_synack(struct sock *sk, struct dst_entry *dst,
 				    &ireq->ir_v6_rmt_addr);
 
 		fl6->daddr = ireq->ir_v6_rmt_addr;
+		if (np->repflow && (ireq->pktopts != NULL))
+			fl6->flowlabel = ip6_flowlabel(ipv6_hdr(ireq->pktopts));
+
 		skb_set_queue_mapping(skb, queue_mapping);
 		err = ip6_xmit(sk, skb, fl6, np->opt, np->tclass);
 		err = net_xmit_eval(err);
@@ -727,7 +730,8 @@ const struct tcp_request_sock_ops tcp_request_sock_ipv6_ops = {
 
 static void tcp_v6_send_response(struct sk_buff *skb, u32 seq, u32 ack,
 				 u32 data_ack, u32 win, u32 tsval, u32 tsecr,
-				 struct tcp_md5sig_key *key, int rst, u8 tclass, int mptcp)
+				 struct tcp_md5sig_key *key, int rst, u8 tclass,
+				 u32 label, int mptcp)
 {
 	const struct tcphdr *th = tcp_hdr(skb);
 	struct tcphdr *t1;
@@ -803,6 +807,7 @@ static void tcp_v6_send_response(struct sk_buff *skb, u32 seq, u32 ack,
 	memset(&fl6, 0, sizeof(fl6));
 	fl6.daddr = ipv6_hdr(skb)->saddr;
 	fl6.saddr = ipv6_hdr(skb)->daddr;
+	fl6.flowlabel = label;
 
 	buff->ip_summed = CHECKSUM_PARTIAL;
 	buff->csum = 0;
@@ -888,7 +893,7 @@ void tcp_v6_send_reset(struct sock *sk, struct sk_buff *skb)
 		ack_seq = ntohl(th->seq) + th->syn + th->fin + skb->len -
 			  (th->doff << 2);
 
-	tcp_v6_send_response(skb, seq, ack_seq, 0, 0, 0, 0, key, 1, 0, 0);
+	tcp_v6_send_response(skb, seq, ack_seq, 0, 0, 0, 0, key, 1, 0, 0, 0);
 
 #ifdef CONFIG_TCP_MD5SIG
 release_sk1:
@@ -901,9 +906,11 @@ release_sk1:
 
 static void tcp_v6_send_ack(struct sk_buff *skb, u32 seq, u32 ack, u32 data_ack,
 			    u32 win, u32 tsval, u32 tsecr,
-			    struct tcp_md5sig_key *key, u8 tclass, int mptcp)
+			    struct tcp_md5sig_key *key, u8 tclass,
+			    u32 label, int mptcp)
 {
-	tcp_v6_send_response(skb, seq, ack, data_ack, win, tsval, tsecr, key, 0, tclass, mptcp);
+	tcp_v6_send_response(skb, seq, ack, data_ack, win, tsval, tsecr, key, 0,
+			     tclass, label, mptcp);
 }
 
 static void tcp_v6_timewait_ack(struct sock *sk, struct sk_buff *skb)
@@ -922,7 +929,7 @@ static void tcp_v6_timewait_ack(struct sock *sk, struct sk_buff *skb)
 			tcptw->tw_rcv_wnd >> tw->tw_rcv_wscale,
 			tcp_time_stamp + tcptw->tw_ts_offset,
 			tcptw->tw_ts_recent, tcp_twsk_md5_key(tcptw),
-			tw->tw_tclass, mptcp);
+			tw->tw_tclass, (tw->tw_flowlabel << 12), mptcp);
 
 	inet_twsk_put(tw);
 }
@@ -932,7 +939,7 @@ void tcp_v6_reqsk_send_ack(struct sock *sk, struct sk_buff *skb,
 {
 	tcp_v6_send_ack(skb, tcp_rsk(req)->snt_isn + 1, tcp_rsk(req)->rcv_isn + 1,
 			0, req->rcv_wnd, tcp_time_stamp, req->ts_recent,
-			tcp_v6_md5_do_lookup(sk, &ipv6_hdr(skb)->daddr), 0, 0);
+			tcp_v6_md5_do_lookup(sk, &ipv6_hdr(skb)->daddr), 0, 0, 0);
 }
 
 
@@ -1075,7 +1082,8 @@ static int tcp_v6_conn_request(struct sock *sk, struct sk_buff *skb)
 	if (!isn) {
 		if (ipv6_opt_accepted(sk, skb) ||
 		    np->rxopt.bits.rxinfo || np->rxopt.bits.rxoinfo ||
-		    np->rxopt.bits.rxhlim || np->rxopt.bits.rxohlim) {
+		    np->rxopt.bits.rxhlim || np->rxopt.bits.rxohlim ||
+		    np->repflow) {
 			atomic_inc(&skb->users);
 			ireq->pktopts = skb;
 		}
@@ -1200,6 +1208,8 @@ struct sock *tcp_v6_syn_recv_sock(struct sock *sk, struct sk_buff *skb,
 		newnp->mcast_oif   = inet6_iif(skb);
 		newnp->mcast_hops  = ipv6_hdr(skb)->hop_limit;
 		newnp->rcv_flowinfo = ip6_flowinfo(ipv6_hdr(skb));
+		if (np->repflow)
+			newnp->flow_label = ip6_flowlabel(ipv6_hdr(skb));
 
 		/*
 		 * No need to charge this sock to the relevant IPv6 refcnt debug socks count
@@ -1280,6 +1290,8 @@ struct sock *tcp_v6_syn_recv_sock(struct sock *sk, struct sk_buff *skb,
 	newnp->mcast_oif  = inet6_iif(skb);
 	newnp->mcast_hops = ipv6_hdr(skb)->hop_limit;
 	newnp->rcv_flowinfo = ip6_flowinfo(ipv6_hdr(skb));
+	if (np->repflow)
+		newnp->flow_label = ip6_flowlabel(ipv6_hdr(skb));
 
 	/* Clone native IPv6 options from listening socket (if any)
 
@@ -1494,6 +1506,8 @@ ipv6_pktoptions:
 			np->mcast_hops = ipv6_hdr(opt_skb)->hop_limit;
 		if (np->rxopt.bits.rxflow || np->rxopt.bits.rxtclass)
 			np->rcv_flowinfo = ip6_flowinfo(ipv6_hdr(opt_skb));
+		if (np->repflow)
+			np->flow_label = ip6_flowlabel(ipv6_hdr(opt_skb));
 		if (ipv6_opt_accepted(sk, opt_skb)) {
 			skb_set_owner_r(opt_skb, sk);
 			opt_skb = xchg(&np->pktoptions, opt_skb);

@@ -668,15 +668,28 @@ extern struct rps_sock_flow_table __rcu *rps_sock_flow_table;
 bool rps_may_expire_flow(struct net_device *dev, u16 rxq_index, u32 flow_id,
 			 u16 filter_id);
 #endif
+#endif /* CONFIG_RPS */
 
 /* This structure contains an instance of an RX queue. */
 struct netdev_rx_queue {
+#ifdef CONFIG_RPS
 	struct rps_map __rcu		*rps_map;
 	struct rps_dev_flow_table __rcu	*rps_flow_table;
+#endif
 	struct kobject			kobj;
 	struct net_device		*dev;
 } ____cacheline_aligned_in_smp;
-#endif /* CONFIG_RPS */
+
+/*
+ * RX queue sysfs structures and functions.
+ */
+struct rx_queue_attribute {
+	struct attribute attr;
+	ssize_t (*show)(struct netdev_rx_queue *queue,
+	    struct rx_queue_attribute *attr, char *buf);
+	ssize_t (*store)(struct netdev_rx_queue *queue,
+	    struct rx_queue_attribute *attr, const char *buf, size_t len);
+};
 
 #ifdef CONFIG_XPS
 /*
@@ -908,6 +921,9 @@ struct netdev_phys_port_id {
  * int (*ndo_del_slave)(struct net_device *dev, struct net_device *slave_dev);
  *	Called to release previously enslaved netdev.
  *
+ * int (*ndo_get_slave)(struct net_device *slave_dev, struct sk_buff *skb);
+ *	Called to fill netlink skb with slave info.
+ *
  *      Feature/offload setting functions.
  * netdev_features_t (*ndo_fix_features)(struct net_device *dev,
  *		netdev_features_t features);
@@ -1080,6 +1096,8 @@ struct net_device_ops {
 						 struct net_device *slave_dev);
 	int			(*ndo_del_slave)(struct net_device *dev,
 						 struct net_device *slave_dev);
+	int			(*ndo_get_slave)(struct net_device *slave_dev,
+						 struct sk_buff *skb);
 	netdev_features_t	(*ndo_fix_features)(struct net_device *dev,
 						    netdev_features_t features);
 	int			(*ndo_set_features)(struct net_device *dev,
@@ -1313,7 +1331,7 @@ struct net_device {
 						   unicast) */
 
 
-#ifdef CONFIG_RPS
+#ifdef CONFIG_SYSFS
 	struct netdev_rx_queue	*_rx;
 
 	/* Number of RX queues allocated at register_netdev() time */
@@ -1424,6 +1442,8 @@ struct net_device {
 	struct device		dev;
 	/* space for optional device, statistics, and wireless sysfs groups */
 	const struct attribute_group *sysfs_groups[4];
+	/* space for optional per-rx queue attributes */
+	const struct attribute_group *sysfs_rx_queue_group;
 
 	/* rtnetlink link ops */
 	const struct rtnl_link_ops *rtnl_link_ops;
@@ -1718,7 +1738,7 @@ struct pcpu_sw_netstats {
 #define NETDEV_CHANGE	0x0004	/* Notify device state change */
 #define NETDEV_REGISTER 0x0005
 #define NETDEV_UNREGISTER	0x0006
-#define NETDEV_CHANGEMTU	0x0007
+#define NETDEV_CHANGEMTU	0x0007 /* notify after mtu change happened */
 #define NETDEV_CHANGEADDR	0x0008
 #define NETDEV_GOING_DOWN	0x0009
 #define NETDEV_CHANGENAME	0x000A
@@ -1734,6 +1754,7 @@ struct pcpu_sw_netstats {
 #define NETDEV_JOIN		0x0014
 #define NETDEV_CHANGEUPPER	0x0015
 #define NETDEV_RESEND_IGMP	0x0016
+#define NETDEV_PRECHANGEMTU	0x0017 /* notify before mtu change happened */
 
 int register_netdevice_notifier(struct notifier_block *nb);
 int unregister_netdevice_notifier(struct notifier_block *nb);
@@ -2374,7 +2395,7 @@ static inline bool netif_is_multiqueue(const struct net_device *dev)
 
 int netif_set_real_num_tx_queues(struct net_device *dev, unsigned int txq);
 
-#ifdef CONFIG_RPS
+#ifdef CONFIG_SYSFS
 int netif_set_real_num_rx_queues(struct net_device *dev, unsigned int rxq);
 #else
 static inline int netif_set_real_num_rx_queues(struct net_device *dev,
@@ -2393,13 +2414,25 @@ static inline int netif_copy_real_num_queues(struct net_device *to_dev,
 					   from_dev->real_num_tx_queues);
 	if (err)
 		return err;
-#ifdef CONFIG_RPS
+#ifdef CONFIG_SYSFS
 	return netif_set_real_num_rx_queues(to_dev,
 					    from_dev->real_num_rx_queues);
 #else
 	return 0;
 #endif
 }
+
+#ifdef CONFIG_SYSFS
+static inline unsigned int get_netdev_rx_queue_index(
+		struct netdev_rx_queue *queue)
+{
+	struct net_device *dev = queue->dev;
+	int index = queue - dev->_rx;
+
+	BUG_ON(index >= dev->num_rx_queues);
+	return index;
+}
+#endif
 
 #define DEFAULT_MAX_NUM_RSS_QUEUES	(8)
 int netif_get_num_default_rss_queues(void);

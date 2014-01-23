@@ -2083,7 +2083,7 @@ int netif_set_real_num_tx_queues(struct net_device *dev, unsigned int txq)
 }
 EXPORT_SYMBOL(netif_set_real_num_tx_queues);
 
-#ifdef CONFIG_RPS
+#ifdef CONFIG_SYSFS
 /**
  *	netif_set_real_num_rx_queues - set actual number of RX queues used
  *	@dev: Network device
@@ -2778,8 +2778,9 @@ int dev_loopback_xmit(struct sk_buff *skb)
 EXPORT_SYMBOL(dev_loopback_xmit);
 
 /**
- *	dev_queue_xmit - transmit a buffer
+ *	__dev_queue_xmit - transmit a buffer
  *	@skb: buffer to transmit
+ *	@accel_priv: private data used for L2 forwarding offload
  *
  *	Queue a buffer for transmission to a network device. The caller must
  *	have set the device and priority and built the buffer before calling
@@ -3821,9 +3822,17 @@ static void gro_list_prepare(struct napi_struct *napi, struct sk_buff *skb)
 {
 	struct sk_buff *p;
 	unsigned int maclen = skb->dev->hard_header_len;
+	u32 hash = skb_get_hash_raw(skb);
 
 	for (p = napi->gro_list; p; p = p->next) {
 		unsigned long diffs;
+
+		NAPI_GRO_CB(p)->flush = 0;
+
+		if (hash != skb_get_hash_raw(p)) {
+			NAPI_GRO_CB(p)->same_flow = 0;
+			continue;
+		}
 
 		diffs = (unsigned long)p->dev ^ (unsigned long)skb->dev;
 		diffs |= p->vlan_tci ^ skb->vlan_tci;
@@ -3835,7 +3844,6 @@ static void gro_list_prepare(struct napi_struct *napi, struct sk_buff *skb)
 				       skb_gro_mac_header(skb),
 				       maclen);
 		NAPI_GRO_CB(p)->same_flow = !diffs;
-		NAPI_GRO_CB(p)->flush = 0;
 	}
 }
 
@@ -5385,6 +5393,11 @@ int dev_set_mtu(struct net_device *dev, int new_mtu)
 	if (!netif_device_present(dev))
 		return -ENODEV;
 
+	err = call_netdevice_notifiers(NETDEV_PRECHANGEMTU, dev);
+	err = notifier_to_errno(err);
+	if (err)
+		return err;
+
 	orig_mtu = dev->mtu;
 	err = __dev_set_mtu(dev, new_mtu);
 
@@ -5752,7 +5765,7 @@ void netif_stacked_transfer_operstate(const struct net_device *rootdev,
 }
 EXPORT_SYMBOL(netif_stacked_transfer_operstate);
 
-#ifdef CONFIG_RPS
+#ifdef CONFIG_SYSFS
 static int netif_alloc_rx_queues(struct net_device *dev)
 {
 	unsigned int i, count = dev->num_rx_queues;
@@ -6297,7 +6310,7 @@ struct net_device *alloc_netdev_mqs(int sizeof_priv, const char *name,
 		return NULL;
 	}
 
-#ifdef CONFIG_RPS
+#ifdef CONFIG_SYSFS
 	if (rxqs < 1) {
 		pr_err("alloc_netdev: Unable to allocate device with zero RX queues\n");
 		return NULL;
@@ -6353,7 +6366,7 @@ struct net_device *alloc_netdev_mqs(int sizeof_priv, const char *name,
 	if (netif_alloc_netdev_queues(dev))
 		goto free_all;
 
-#ifdef CONFIG_RPS
+#ifdef CONFIG_SYSFS
 	dev->num_rx_queues = rxqs;
 	dev->real_num_rx_queues = rxqs;
 	if (netif_alloc_rx_queues(dev))
@@ -6373,7 +6386,7 @@ free_all:
 free_pcpu:
 	free_percpu(dev->pcpu_refcnt);
 	netif_free_tx_queues(dev);
-#ifdef CONFIG_RPS
+#ifdef CONFIG_SYSFS
 	kfree(dev->_rx);
 #endif
 
@@ -6398,7 +6411,7 @@ void free_netdev(struct net_device *dev)
 	release_net(dev_net(dev));
 
 	netif_free_tx_queues(dev);
-#ifdef CONFIG_RPS
+#ifdef CONFIG_SYSFS
 	kfree(dev->_rx);
 #endif
 
