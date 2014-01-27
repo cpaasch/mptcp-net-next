@@ -1494,53 +1494,63 @@ int tcp_v4_conn_request(struct sock *sk, struct sk_buff *skb)
 	struct tcp_fastopen_cookie valid_foc = { .len = -1 };
 	struct sk_buff *skb_synack;
 	int do_fastopen;
+	struct mptcp_request_sock *mtreq;
+	u8 mptcp_hash_mac[20];
+	union inet_addr addr;
+	bool is_meta = is_meta_sk(sk);
 
 	tcp_clear_options(&tmp_opt);
 	tmp_opt.mss_clamp = TCP_MSS_DEFAULT;
 	tmp_opt.user_mss  = tp->rx_opt.user_mss;
 	mptcp_init_mp_opt(&mopt);
-	tcp_parse_options(skb, &tmp_opt, &mopt, 0, want_cookie ? NULL : &foc);
+	tcp_parse_options(skb, &tmp_opt, &mopt, 0,
+		want_cookie || is_meta ? NULL : &foc);
 
+	if (!is_meta) {
 #ifdef CONFIG_MPTCP
-	/* MPTCP structures not initialized, so clear MPTCP fields */
-	if  (mptcp_init_failed)
-		mptcp_init_mp_opt(&mopt);
+		/* MPTCP structures not initialized, so clear MPTCP fields */
+		if  (mptcp_init_failed)
+			mptcp_init_mp_opt(&mopt);
 
-	if (mopt.is_mp_join)
-		return mptcp_do_join_short(skb, &mopt, &tmp_opt, sock_net(sk));
-	if (mopt.drop_me)
-		goto drop;
-#endif
-	/* Never answer to SYNs send to broadcast or multicast */
-	if (skb_rtable(skb)->rt_flags & (RTCF_BROADCAST | RTCF_MULTICAST))
-		goto drop;
-
-	/* TW buckets are converted to open requests without
-	 * limitations, they conserve resources and peer is
-	 * evidently real one.
-	 */
-	if ((sysctl_tcp_syncookies == 2 ||
-	     inet_csk_reqsk_queue_is_full(sk)) && !isn) {
-		want_cookie = tcp_syn_flood_action(sk, skb, "TCP");
-		if (!want_cookie)
+		if (mopt.is_mp_join)
+			return mptcp_do_join_short(skb, &mopt, &tmp_opt,
+						sock_net(sk));
+		if (mopt.drop_me)
 			goto drop;
-	}
+#endif
+		/* Never answer to SYNs send to broadcast or multicast */
+		if (skb_rtable(skb)->rt_flags &
+			(RTCF_BROADCAST | RTCF_MULTICAST))
+			goto drop;
 
-	/* Accept backlog is full. If we have already queued enough
-	 * of warm entries in syn queue, drop request. It is better than
-	 * clogging syn queue with openreqs with exponentially increasing
-	 * timeout.
-	 */
-	if (sk_acceptq_is_full(sk) && inet_csk_reqsk_queue_young(sk) > 1) {
-		NET_INC_STATS_BH(sock_net(sk), LINUX_MIB_LISTENOVERFLOWS);
-		goto drop;
-	}
+		/* TW buckets are converted to open requests without
+		 * limitations, they conserve resources and peer is
+		 * evidently real one.
+		 */
+		if ((sysctl_tcp_syncookies == 2 ||
+		     inet_csk_reqsk_queue_is_full(sk)) && !isn) {
+			want_cookie = tcp_syn_flood_action(sk, skb, "TCP");
+			if (!want_cookie)
+				goto drop;
+		}
+
+		/* Accept backlog is full. If we have already queued enough
+		 * of warm entries in syn queue, drop request. It is better than
+		 * clogging syn queue with openreqs with exponentially
+		 * increasing timeout.
+		 */
+		if (sk_acceptq_is_full(sk) &&
+			inet_csk_reqsk_queue_young(sk) > 1) {
+			NET_INC_STATS_BH(sock_net(sk),
+					LINUX_MIB_LISTENOVERFLOWS);
+			goto drop;
+		}
 
 #ifdef CONFIG_MPTCP
-	if (sysctl_mptcp_enabled == MPTCP_APP && !tp->mptcp_enabled)
-		mopt.saw_mpc = 0;
-	if (mopt.saw_mpc && !want_cookie) {
-		req = inet_reqsk_alloc(&mptcp_request_sock_ops);
+		if (sysctl_mptcp_enabled == MPTCP_APP && !tp->mptcp_enabled)
+			mopt.saw_mpc = 0;
+		if (mopt.saw_mpc && !want_cookie) {
+			req = inet_reqsk_alloc(&mptcp_request_sock_ops);
 
 		if (!req)
 			goto drop;
@@ -1548,12 +1558,16 @@ int tcp_v4_conn_request(struct sock *sk, struct sk_buff *skb)
 		mptcp_rsk(req)->mpcb = NULL;
 		mptcp_rsk(req)->dss_csum = mopt.dss_csum;
 		mptcp_rsk(req)->collide_tk.pprev = NULL;
-	} else
+		} else
 #endif
 		req = inet_reqsk_alloc(&tcp_request_sock_ops);
-
-	if (!req)
-		goto drop;
+		if (!req)
+			goto drop;
+	} else {
+		req = inet_reqsk_alloc(&mptcp_request_sock_ops);
+		if (!req)
+			return 0;
+	}
 
 #ifdef CONFIG_TCP_MD5SIG
 	tcp_rsk(req)->af_specific = &tcp_request_sock_ipv4_ops;
@@ -1565,7 +1579,7 @@ int tcp_v4_conn_request(struct sock *sk, struct sk_buff *skb)
 	tmp_opt.tstamp_ok = tmp_opt.saw_tstamp;
 	tcp_openreq_init(req, &tmp_opt, skb);
 
-	if (mopt.saw_mpc && !want_cookie)
+	if (!is_meta && mopt.saw_mpc && !want_cookie)
 		mptcp_reqsk_new_mptcp(req, &tmp_opt, &mopt, skb);
 
 	ireq = inet_rsk(req);
@@ -1623,12 +1637,43 @@ int tcp_v4_conn_request(struct sock *sk, struct sk_buff *skb)
 	}
 	tcp_rsk(req)->snt_isn = isn;
 
+	/* MPTCP meta-socket settings. */
+	if (is_meta) {
+		struct mptcp_cb *mpcb = tp->mpcb;
+
+		mtreq		= mptcp_rsk(req);
+		mtreq->mpcb	= mpcb;
+		INIT_LIST_HEAD(&mtreq->collide_tuple);
+		mtreq->mptcp_rem_nonce	= mopt.mptcp_recv_nonce;
+		mtreq->mptcp_rem_key	= mpcb->mptcp_rem_key;
+		mtreq->mptcp_loc_key	= mpcb->mptcp_loc_key;
+		mtreq->mptcp_loc_nonce	= mptcp_v4_get_nonce(saddr, daddr,
+						tcp_hdr(skb)->source,
+						tcp_hdr(skb)->dest, isn);
+		mptcp_hmac_sha1((u8 *)&mtreq->mptcp_loc_key,
+				(u8 *)&mtreq->mptcp_rem_key,
+				(u8 *)&mtreq->mptcp_loc_nonce,
+				(u8 *)&mtreq->mptcp_rem_nonce,
+				(u32 *)mptcp_hash_mac);
+		mtreq->mptcp_hash_tmac	= *(u64 *)mptcp_hash_mac;
+
+		addr.ip = ireq->ir_loc_addr;
+		mtreq->loc_id = mpcb->pm_ops->get_local_id(AF_INET, &addr,
+					sock_net(sk));
+		mtreq->rem_id = mopt.rem_id;
+		mtreq->low_prio = mopt.low_prio;
+		tcp_rsk(req)->saw_mpc = 1;
+	}
+
 	if (dst == NULL) {
 		dst = inet_csk_route_req(sk, &fl4, req);
 		if (dst == NULL)
 			goto drop_and_free;
 	}
-	do_fastopen = tcp_fastopen_check(sk, skb, req, &foc, &valid_foc);
+
+	if (!is_meta)
+		do_fastopen = tcp_fastopen_check(sk, skb, req, &foc,
+						&valid_foc);
 
 	/* We don't call tcp_v4_send_synack() directly because we need
 	 * to make sure a child socket can be created successfully before
@@ -1642,15 +1687,16 @@ int tcp_v4_conn_request(struct sock *sk, struct sk_buff *skb)
 	 * of tcp_v4_send_synack()->tcp_select_initial_window().
 	 */
 	skb_synack = tcp_make_synack(sk, dst, req,
-	    fastopen_cookie_present(&valid_foc) ? &valid_foc : NULL);
+		!is_meta && fastopen_cookie_present(&valid_foc) ?
+			&valid_foc : NULL);
 
-	if (skb_synack) {
-		__tcp_v4_send_check(skb_synack, ireq->ir_loc_addr, ireq->ir_rmt_addr);
-		skb_set_queue_mapping(skb_synack, skb_get_queue_mapping(skb));
-	} else
+	if (!skb_synack)
 		goto drop_and_free;
 
-	if (likely(!do_fastopen)) {
+	__tcp_v4_send_check(skb_synack, ireq->ir_loc_addr, ireq->ir_rmt_addr);
+	skb_set_queue_mapping(skb_synack, skb_get_queue_mapping(skb));
+
+	if (likely(!do_fastopen) || is_meta) {
 		int err;
 		err = ip_build_and_send_pkt(skb_synack, sk, ireq->ir_loc_addr,
 		     ireq->ir_rmt_addr, ireq->opt);
@@ -1660,12 +1706,20 @@ int tcp_v4_conn_request(struct sock *sk, struct sk_buff *skb)
 
 		tcp_rsk(req)->snt_synack = tcp_time_stamp;
 		tcp_rsk(req)->listener = NULL;
+
 		/* Add the request_sock to the SYN table */
-		inet_csk_reqsk_queue_hash_add(sk, req, TCP_TIMEOUT_INIT);
+		if (is_meta)
+			mptcp_v4_reqsk_queue_hash_add(sk, req,
+						TCP_TIMEOUT_INIT);
+		else
+			inet_csk_reqsk_queue_hash_add(sk, req,
+						TCP_TIMEOUT_INIT);
+
 		if (fastopen_cookie_present(&foc) && foc.len != 0)
 			NET_INC_STATS_BH(sock_net(sk),
 			    LINUX_MIB_TCPFASTOPENPASSIVEFAIL);
-	} else if (tcp_v4_conn_req_fastopen(sk, skb, skb_synack, req))
+	} else if (!is_meta && tcp_v4_conn_req_fastopen(sk, skb,
+						skb_synack, req))
 		goto drop_and_free;
 
 	return 0;

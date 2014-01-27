@@ -55,6 +55,9 @@ void mptcp_pm_v4_undo(void);
 u32 mptcp_v4_get_nonce(__be32 saddr, __be32 daddr, __be16 sport, __be16 dport,
 		       u32 seq);
 u64 mptcp_v4_get_key(__be32 saddr, __be32 daddr, __be16 sport, __be16 dport);
+void mptcp_v4_reqsk_queue_hash_add(struct sock *meta_sk,
+					struct request_sock *req,
+					unsigned long timeout);
 
 #else
 
