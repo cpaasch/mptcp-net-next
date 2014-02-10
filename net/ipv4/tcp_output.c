@@ -2701,15 +2701,27 @@ void tcp_send_fin(struct sock *sk)
 	struct tcp_sock *tp = tcp_sk(sk);
 	struct sk_buff *skb = tcp_write_queue_tail(sk);
 	int mss_now;
+	bool is_meta = is_meta_sk(sk);
 
-	/* Optimization, tack on the FIN if we have a queue of
-	 * unsent frames.  But be careful about outgoing SACKS
-	 * and IP options.
-	 */
-	mss_now = tcp_current_mss(sk);
+	if (is_meta) {
+		if ((1 << sk->sk_state) & (TCPF_CLOSE_WAIT |
+				TCPF_LAST_ACK))
+			tp->mpcb->passive_close = 1;
+
+		/* Optimization, tack on the FIN if we have a queue of
+		 * unsent frames.  But be careful about outgoing SACKS
+		 * and IP options.
+		 */
+		mss_now = mptcp_current_mss(sk);
+	} else {
+		mss_now = tcp_current_mss(sk);
+	}
 
 	if (tcp_send_head(sk) != NULL) {
-		TCP_SKB_CB(skb)->tcp_flags |= TCPHDR_FIN;
+		if (is_meta)
+			TCP_SKB_CB(skb)->mptcp_flags |= MPTCPHDR_FIN;
+		else
+			TCP_SKB_CB(skb)->tcp_flags |= TCPHDR_FIN;
 		TCP_SKB_CB(skb)->end_seq++;
 		tp->write_seq++;
 	} else {
@@ -2724,11 +2736,23 @@ void tcp_send_fin(struct sock *sk)
 
 		/* Reserve space for headers and prepare control bits. */
 		skb_reserve(skb, MAX_TCP_HEADER);
-		/* FIN eats a sequence byte, write_seq advanced by tcp_queue_skb(). */
-		tcp_init_nondata_skb(skb, tp->write_seq,
-				     TCPHDR_ACK | TCPHDR_FIN);
+
+		if (is_meta) {
+			tcp_init_nondata_skb(skb, tp->write_seq, TCPHDR_ACK);
+			TCP_SKB_CB(skb)->end_seq++;
+			TCP_SKB_CB(skb)->mptcp_flags |=
+					MPTCPHDR_FIN | MPTCPHDR_SEQ;
+		} else {
+			/* FIN eats a sequence byte, write_seq advanced by
+			 * tcp_queue_skb().
+			 */
+			tcp_init_nondata_skb(skb, tp->write_seq,
+					     TCPHDR_ACK | TCPHDR_FIN);
+		}
+
 		tcp_queue_skb(sk, skb);
 	}
+
 	__tcp_push_pending_frames(sk, mss_now, TCP_NAGLE_OFF);
 }
 

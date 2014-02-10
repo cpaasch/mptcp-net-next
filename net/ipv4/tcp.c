@@ -2166,10 +2166,7 @@ void tcp_shutdown(struct sock *sk, int how)
 	     TCPF_SYN_RECV | TCPF_CLOSE_WAIT)) {
 		/* Clear out any half completed packets.  FIN if needed. */
 		if (tcp_close_state(sk)) {
-			if (!is_meta_sk(sk))
-				tcp_send_fin(sk);
-			else
-				mptcp_send_fin(sk);
+			tcp_send_fin(sk);
 		}
 	}
 }
@@ -2295,7 +2292,7 @@ void tcp_close(struct sock *sk, long timeout)
 		 * probably need API support or TCP_CORK SYN-ACK until
 		 * data is written and socket is closed.)
 		 */
-		is_meta ? mptcp_send_fin(sk) : tcp_send_fin(sk);
+		tcp_send_fin(sk);
 	} else if (is_meta && tp->snd_una == tp->write_seq) {
 		/* The DATA_FIN has been sent and acknowledged
 		 * (e.g., by sk_shutdown). Close all the other subflows
