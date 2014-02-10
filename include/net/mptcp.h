@@ -1288,7 +1288,6 @@ static inline int mptcp_write_wakeup(struct sock *meta_sk)
 	return 0;
 }
 static inline void mptcp_sub_close(struct sock *sk, unsigned long delay) {}
-static inline void mptcp_set_rto(const struct sock *sk) {}
 static inline void mptcp_send_fin(const struct sock *meta_sk) {}
 static inline void mptcp_parse_options(const uint8_t *ptr, const int opsize,
 				       const struct tcp_options_received *opt_rx,
@@ -1358,6 +1357,7 @@ static inline int mptcp_check_snd_buf(const struct tcp_sock *tp)
 {
 	return 0;
 }
+static inline void mptcp_set_rto(struct sock *sk) {}
 static inline int mptcp_sysctl_syn_retries(void)
 {
 	return 0;
