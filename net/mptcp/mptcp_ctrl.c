@@ -355,12 +355,8 @@ static struct sock *mptcp_syn_recv_sock(struct sock *sk, struct sk_buff *skb,
 					struct dst_entry *dst)
 {
 #if IS_ENABLED(CONFIG_IPV6)
-	if (sk->sk_family == AF_INET6)
+	if (sk->sk_family == AF_INET6 || req->rsk_ops->family == AF_INET6)
 		return tcp_v6_syn_recv_sock(sk, skb, req, dst);
-
-	/* sk->sk_family == AF_INET */
-	if (req->rsk_ops->family == AF_INET6)
-		return mptcp_v6v4_syn_recv_sock(sk, skb, req, dst);
 #endif
 
 	/* sk->sk_family == AF_INET && req->rsk_ops->family == AF_INET */

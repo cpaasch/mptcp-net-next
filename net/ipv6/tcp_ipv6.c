@@ -1244,7 +1244,7 @@ struct sock *tcp_v6_syn_recv_sock(struct sock *sk, struct sk_buff *skb,
 	struct flowi6 fl6;
 	bool is_meta = is_meta_sk(sk);
 
-	if (skb->protocol == htons(ETH_P_IP)) {
+	if (skb->protocol == htons(ETH_P_IP) && !is_meta) {
 		/*
 		 *	v6 mapped
 		 */
@@ -1275,13 +1275,13 @@ struct sock *tcp_v6_syn_recv_sock(struct sock *sk, struct sk_buff *skb,
 		newtp->af_specific = &tcp_sock_ipv6_mapped_specific;
 #endif
 
-		newnp->ipv6_ac_list = NULL;
-		newnp->ipv6_fl_list = NULL;
-		newnp->pktoptions  = NULL;
-		newnp->opt	   = NULL;
-		newnp->mcast_oif   = inet6_iif(skb);
-		newnp->mcast_hops  = ipv6_hdr(skb)->hop_limit;
-		newnp->rcv_flowinfo = ip6_flowinfo(ipv6_hdr(skb));
+		newnp->ipv6_ac_list	= NULL;
+		newnp->ipv6_fl_list	= NULL;
+		newnp->pktoptions	= NULL;
+		newnp->opt		= NULL;
+		newnp->mcast_oif	= inet6_iif(skb);
+		newnp->mcast_hops	= ipv6_hdr(skb)->hop_limit;
+		newnp->rcv_flowinfo	= ip6_flowinfo(ipv6_hdr(skb));
 		if (np->repflow)
 			newnp->flow_label = ip6_flowlabel(ipv6_hdr(skb));
 
@@ -1315,18 +1315,17 @@ struct sock *tcp_v6_syn_recv_sock(struct sock *sk, struct sk_buff *skb,
 	if (newsk == NULL)
 		goto out_nonewsk;
 
+	newtcp6sk = (struct tcp6_sock *)newsk;
+	inet_sk(newsk)->pinet6 = &newtcp6sk->inet6;
+
 	/*
 	 * No need to charge this sock to the relevant IPv6 refcnt debug socks
 	 * count here, tcp_create_openreq_child now does this for us, see the
 	 * comment in that function for the gory details. -acme
 	 */
-
 	newsk->sk_gso_type = SKB_GSO_TCPV6;
 	__ip6_dst_store(newsk, dst, NULL, NULL);
 	inet6_sk_rx_dst_set(newsk, skb);
-
-	newtcp6sk = (struct tcp6_sock *)newsk;
-	inet_sk(newsk)->pinet6 = &newtcp6sk->inet6;
 
 	newtp = tcp_sk(newsk);
 	newinet = inet_sk(newsk);
@@ -1363,21 +1362,34 @@ struct sock *tcp_v6_syn_recv_sock(struct sock *sk, struct sk_buff *skb,
 	newnp->opt	  = NULL;
 	newnp->mcast_oif  = inet6_iif(skb);
 	newnp->mcast_hops = ipv6_hdr(skb)->hop_limit;
-	newnp->rcv_flowinfo = ip6_flowinfo(ipv6_hdr(skb));
-	if (np->repflow)
-		newnp->flow_label = ip6_flowlabel(ipv6_hdr(skb));
 
-	/* Clone native IPv6 options from listening socket (if any)
+	if (is_meta) {
+		/* Initialization copied from inet6_create - normally this
+		 * should have been handled by the memcpy as in
+		 * tcp_v6_syn_recv_sock.
+		*/
+		newnp->hop_limit	= -1;
+		newnp->mc_loop		= 1;
+		newnp->pmtudisc		= IPV6_PMTUDISC_WANT;
+		(void)xchg(&newnp->rxpmtu, NULL);
+	} else {
+		newnp->rcv_flowinfo = ip6_flowinfo(ipv6_hdr(skb));
+		if (np->repflow)
+			newnp->flow_label = ip6_flowlabel(ipv6_hdr(skb));
 
-	   Yes, keeping reference count would be much more clever,
-	   but we make one more one thing there: reattach optmem
-	   to newsk.
-	 */
-	if (np->opt)
-		newnp->opt = ipv6_dup_options(newsk, np->opt);
+		/* Clone native IPv6 options from listening socket (if any)
+
+		   Yes, keeping reference count would be much more clever,
+		   but we make one more one thing there: reattach optmem
+		   to newsk.
+		 */
+		if (np->opt)
+			newnp->opt = ipv6_dup_options(newsk, np->opt);
+	}
 
 	inet_csk(newsk)->icsk_ext_hdr_len = 0;
-	if (newnp->opt)
+
+	if (!is_meta && newnp->opt)
 		inet_csk(newsk)->icsk_ext_hdr_len = (newnp->opt->opt_nflen +
 						     newnp->opt->opt_flen);
 
@@ -1390,12 +1402,14 @@ struct sock *tcp_v6_syn_recv_sock(struct sock *sk, struct sk_buff *skb,
 
 	tcp_initialize_rcv_mss(newsk);
 
-	newinet->inet_daddr = newinet->inet_saddr = LOOPBACK4_IPV6;
-	newinet->inet_rcv_saddr = LOOPBACK4_IPV6;
+	newinet->inet_daddr	= LOOPBACK4_IPV6;
+	newinet->inet_saddr	= LOOPBACK4_IPV6;
+	newinet->inet_rcv_saddr	= LOOPBACK4_IPV6;
 
 #ifdef CONFIG_TCP_MD5SIG
 	/* Copy over the MD5 key from the original socket */
-	if ((key = tcp_v6_md5_do_lookup(sk, &newsk->sk_v6_daddr)) != NULL) {
+	if (!is_meta &&
+		(key = tcp_v6_md5_do_lookup(sk, &newsk->sk_v6_daddr)) != NULL) {
 		/* We're using one, so create a matching key
 		 * on the newsk structure. If we fail to get
 		 * memory, then we end up not copying the key
