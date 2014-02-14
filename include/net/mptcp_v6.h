@@ -59,12 +59,27 @@ __u32 mptcp_v6_get_nonce(const __be32 *saddr, const __be32 *daddr,
 			 __be16 sport, __be16 dport, u32 seq);
 u64 mptcp_v6_get_key(const __be32 *saddr, const __be32 *daddr,
 		     __be16 sport, __be16 dport);
-
+int mptcp_v6v4_send_synack(struct sock *meta_sk, struct request_sock *req,
+			u16 queue_mapping);
+void mptcp_v6_reqsk_queue_hash_add(struct sock *meta_sk,
+			struct request_sock *req, unsigned long timeout);
 #else /* CONFIG_MPTCP */
 
 static inline int mptcp_v6_do_rcv(struct sock *meta_sk, struct sk_buff *skb)
 {
 	return 0;
+}
+
+static inline int  mptcp_v6v4_send_synack(struct sock *meta_sk,
+			struct request_sock *req, u16 queue_mapping)
+{
+	return 0;
+}
+
+static inline void mptcp_v6_reqsk_queue_hash_add(struct sock *meta_sk,·
+			struct request_sock *req, unsigned long timeout)
+{
+	return;
 }
 
 #endif /* CONFIG_MPTCP */
