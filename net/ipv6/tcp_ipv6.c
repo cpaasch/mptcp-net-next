@@ -985,7 +985,7 @@ struct sock *tcp_v6_hnd_req(struct sock *sk, struct sk_buff *skb)
 /* FIXME: this is substantially similar to the ipv4 code.
  * Can some kind of merge be done? -- erics
  */
-static int tcp_v6_conn_request(struct sock *sk, struct sk_buff *skb)
+int tcp_v6_conn_request(struct sock *sk, struct sk_buff *skb)
 {
 	struct tcp_options_received tmp_opt;
 	struct mptcp_options_received mopt;
@@ -997,40 +997,47 @@ static int tcp_v6_conn_request(struct sock *sk, struct sk_buff *skb)
 	struct dst_entry *dst = NULL;
 	struct flowi6 fl6;
 	bool want_cookie = false;
+	bool is_meta = is_meta_sk(sk);
 
-	if (skb->protocol == htons(ETH_P_IP))
+	if (!is_meta && skb->protocol == htons(ETH_P_IP))
 		return tcp_v4_conn_request(sk, skb);
 
 	tcp_clear_options(&tmp_opt);
-	tmp_opt.mss_clamp = IPV6_MIN_MTU - sizeof(struct tcphdr) - sizeof(struct ipv6hdr);
+	tmp_opt.mss_clamp = is_meta ? TCP_MSS_DEFAULT:
+		IPV6_MIN_MTU - sizeof(struct tcphdr) - sizeof(struct ipv6hdr);
 	tmp_opt.user_mss = tp->rx_opt.user_mss;
 	mptcp_init_mp_opt(&mopt);
 	tcp_parse_options(skb, &tmp_opt, &mopt, 0, NULL);
 
+	if (!is_meta) {
 #ifdef CONFIG_MPTCP
-	/*MPTCP structures not initialized, so return error */
-	if (mptcp_init_failed)
-		mptcp_init_mp_opt(&mopt);
+		/*MPTCP structures not initialized, so return error */
+		if (mptcp_init_failed)
+			mptcp_init_mp_opt(&mopt);
 
-	if (mopt.is_mp_join)
-		return mptcp_do_join_short(skb, &mopt, &tmp_opt, sock_net(sk));
-	if (mopt.drop_me)
-		goto drop;
+		if (mopt.is_mp_join)
+			return mptcp_do_join_short(skb, &mopt, &tmp_opt,
+						sock_net(sk));
+		if (mopt.drop_me)
+			goto drop;
 #endif
 
-	if (!ipv6_unicast_destination(skb))
-		goto drop;
-
-	if ((sysctl_tcp_syncookies == 2 ||
-	     inet_csk_reqsk_queue_is_full(sk)) && !isn) {
-		want_cookie = tcp_syn_flood_action(sk, skb, "TCPv6");
-		if (!want_cookie)
+		if (!ipv6_unicast_destination(skb))
 			goto drop;
-	}
 
-	if (sk_acceptq_is_full(sk) && inet_csk_reqsk_queue_young(sk) > 1) {
-		NET_INC_STATS_BH(sock_net(sk), LINUX_MIB_LISTENOVERFLOWS);
-		goto drop;
+		if ((sysctl_tcp_syncookies == 2 ||
+		     inet_csk_reqsk_queue_is_full(sk)) && !isn) {
+			want_cookie = tcp_syn_flood_action(sk, skb, "TCPv6");
+			if (!want_cookie)
+				goto drop;
+		}
+
+		if (sk_acceptq_is_full(sk) && inet_csk_reqsk_queue_young(sk) >
+				1) {
+			NET_INC_STATS_BH(sock_net(sk),
+					LINUX_MIB_LISTENOVERFLOWS);
+			goto drop;
+		}
 	}
 
 #ifdef CONFIG_MPTCP
@@ -1042,9 +1049,11 @@ static int tcp_v6_conn_request(struct sock *sk, struct sk_buff *skb)
 		if (req == NULL)
 			goto drop;
 
-		mptcp_rsk(req)->mpcb = NULL;
-		mptcp_rsk(req)->dss_csum = mopt.dss_csum;
-		mptcp_rsk(req)->collide_tk.pprev = NULL;
+		if (!is_meta) {
+			mptcp_rsk(req)->mpcb = NULL;
+			mptcp_rsk(req)->dss_csum = mopt.dss_csum;
+			mptcp_rsk(req)->collide_tk.pprev = NULL;
+		}
 	} else
 #endif
 		req = inet6_reqsk_alloc(&tcp6_request_sock_ops);
@@ -1062,7 +1071,7 @@ static int tcp_v6_conn_request(struct sock *sk, struct sk_buff *skb)
 	tmp_opt.tstamp_ok = tmp_opt.saw_tstamp;
 	tcp_openreq_init(req, &tmp_opt, skb);
 
-	if (mopt.saw_mpc && !want_cookie)
+	if (!is_meta && mopt.saw_mpc && !want_cookie)
 		mptcp_reqsk_new_mptcp(req, &tmp_opt, &mopt, skb);
 
 	ireq = inet_rsk(req);
@@ -1080,10 +1089,13 @@ static int tcp_v6_conn_request(struct sock *sk, struct sk_buff *skb)
 		ireq->ir_iif = inet6_iif(skb);
 
 	if (!isn) {
-		if (ipv6_opt_accepted(sk, skb) ||
-		    np->rxopt.bits.rxinfo || np->rxopt.bits.rxoinfo ||
-		    np->rxopt.bits.rxhlim || np->rxopt.bits.rxohlim ||
-		    np->repflow) {
+		if ( (!is_meta || sk->sk_family == AF_INET6) &&
+				(ipv6_opt_accepted(sk, skb) ||
+				np->rxopt.bits.rxinfo ||
+				np->rxopt.bits.rxoinfo ||
+				np->rxopt.bits.rxhlim ||
+				np->rxopt.bits.rxohlim ||
+				np->repflow)) {
 			atomic_inc(&skb->users);
 			ireq->pktopts = skb;
 		}
@@ -1133,17 +1145,62 @@ static int tcp_v6_conn_request(struct sock *sk, struct sk_buff *skb)
 have_isn:
 	tcp_rsk(req)->snt_isn = isn;
 
-	if (security_inet_conn_request(sk, skb, req))
+	if (!is_meta && security_inet_conn_request(sk, skb, req))
 		goto drop_and_release;
 
-	if (tcp_v6_send_synack(sk, dst, &fl6, req,
-			       skb_get_queue_mapping(skb)) ||
-	    want_cookie)
-		goto drop_and_free;
+	/* Build MPTCP sock request for meta-socket. */
+	if (is_meta) {
+		struct mptcp_request_sock *mtreq	= mptcp_rsk(req);
+		struct mptcp_cb *mpcb			= tp->mpcb;
+		u8 mptcp_hash_mac[20];
+		union inet_addr addr;
+
+		mtreq->mpcb = mpcb;
+		INIT_LIST_HEAD(&mtreq->collide_tuple);
+		mtreq->mptcp_rem_nonce	= mopt.mptcp_recv_nonce;
+		mtreq->mptcp_rem_key	= mpcb->mptcp_rem_key;
+		mtreq->mptcp_loc_key	= mpcb->mptcp_loc_key;
+		mtreq->mptcp_loc_nonce	= mptcp_v6_get_nonce(
+						ipv6_hdr(skb)->daddr.s6_addr32,
+						ipv6_hdr(skb)->saddr.s6_addr32,
+						tcp_hdr(skb)->dest,
+						tcp_hdr(skb)->source, isn);
+		mptcp_hmac_sha1((u8 *)&mtreq->mptcp_loc_key,
+				(u8 *)&mtreq->mptcp_rem_key,
+				(u8 *)&mtreq->mptcp_loc_nonce,
+				(u8 *)&mtreq->mptcp_rem_nonce,
+				(u32*)mptcp_hash_mac);
+		mtreq->mptcp_hash_tmac	= *(u64 *)mptcp_hash_mac;
+
+		addr.in6		= ireq->ir_v6_loc_addr;
+		mtreq->loc_id		= mpcb->pm_ops->get_local_id(AF_INET6,
+							&addr,
+							sock_net(sk));
+		mtreq->rem_id		= mopt.rem_id;
+		mtreq->low_prio		= mopt.low_prio;
+		tcp_rsk(req)->saw_mpc	= 1;
+	}
+
+	if (!is_meta || sk->sk_family == AF_INET6) {
+		if (tcp_v6_send_synack(sk, dst, &fl6, req,
+					skb_get_queue_mapping(skb)) ||
+				want_cookie)
+			goto drop_and_free;
+	} else {
+		if (mptcp_v6v4_send_synack(sk, req,
+					skb_get_queue_mapping(skb)))
+			goto drop_and_free;
+	}
 
 	tcp_rsk(req)->snt_synack = tcp_time_stamp;
 	tcp_rsk(req)->listener = NULL;
-	inet6_csk_reqsk_queue_hash_add(sk, req, TCP_TIMEOUT_INIT);
+
+	if (is_meta)
+		/* Adding to request queue in metasocket. */
+		mptcp_v6_reqsk_queue_hash_add(sk, req, TCP_TIMEOUT_INIT);
+	else
+		inet6_csk_reqsk_queue_hash_add(sk, req, TCP_TIMEOUT_INIT);
+
 	return 0;
 
 drop_and_release:
@@ -1151,7 +1208,9 @@ drop_and_release:
 drop_and_free:
 	reqsk_free(req);
 drop:
-	NET_INC_STATS_BH(sock_net(sk), LINUX_MIB_LISTENDROPS);
+	if (!is_meta)
+		NET_INC_STATS_BH(sock_net(sk), LINUX_MIB_LISTENDROPS);
+
 	return 0; /* don't send reset */
 }
 

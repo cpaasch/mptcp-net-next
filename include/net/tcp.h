@@ -55,9 +55,9 @@ void tcp_time_wait(struct sock *sk, int state, int timeo);
 #define MAX_TCP_HEADER	(128 + MAX_HEADER)
 #define MAX_TCP_OPTION_SPACE 40
 
-/* 
+/*
  * Never offer a window over 32767 without using window scaling. Some
- * poor stacks do signed 16bit maths! 
+ * poor stacks do signed 16bit maths!
  */
 #define MAX_TCP_WINDOW		32767U
 
@@ -167,7 +167,7 @@ void tcp_time_wait(struct sock *sk, int state, int timeo);
 /*
  *	TCP option
  */
- 
+
 #define TCPOPT_NOP		1	/* Padding */
 #define TCPOPT_EOL		0	/* End of options */
 #define TCPOPT_MSS		2	/* Segment size negotiating */
@@ -441,6 +441,7 @@ int tcp_v6_send_synack(struct sock *sk, struct dst_entry *dst,
 void tcp_v6_send_reset(struct sock *sk, struct sk_buff *skb);
 int tcp_v6_do_rcv(struct sock *sk, struct sk_buff *skb);
 int tcp_v6_connect(struct sock *sk, struct sockaddr *uaddr, int addr_len);
+int tcp_v6_conn_request(struct sock *sk, struct sk_buff *skb);
 void tcp_v6_destroy_sock(struct sock *sk);
 void inet6_sk_rx_dst_set(struct sock *sk, const struct sk_buff *skb);
 void tcp_v6_hash(struct sock *sk);
@@ -1203,7 +1204,7 @@ static inline int tcp_win_from_space(int space)
 		space - (space>>sysctl_tcp_adv_win_scale);
 }
 
-/* Note: caller must be prepared to deal with negative returns */ 
+/* Note: caller must be prepared to deal with negative returns */
 static inline int tcp_space(const struct sock *sk)
 {
 	if (tcp_sk(sk)->mpc)
@@ -1211,14 +1212,14 @@ static inline int tcp_space(const struct sock *sk)
 
 	return tcp_win_from_space(sk->sk_rcvbuf -
 				  atomic_read(&sk->sk_rmem_alloc));
-} 
+}
 
 static inline int tcp_full_space(const struct sock *sk)
 {
 	if (tcp_sk(sk)->mpc)
 		sk = tcp_sk(sk)->meta_sk;
 
-	return tcp_win_from_space(sk->sk_rcvbuf); 
+	return tcp_win_from_space(sk->sk_rcvbuf);
 }
 
 static inline void tcp_openreq_init(struct request_sock *req,

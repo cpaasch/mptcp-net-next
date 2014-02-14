@@ -44,9 +44,6 @@
 #include <net/tcp.h>
 #include <net/transp_v6.h>
 
-static int mptcp_v6v4_send_synack(struct sock *meta_sk, struct request_sock *req,
-				  u16 queue_mapping);
-
 __u32 mptcp_v6_get_nonce(const __be32 *saddr, const __be32 *daddr,
 			 __be16 sport, __be16 dport, u32 seq)
 {
@@ -117,7 +114,7 @@ struct request_sock_ops mptcp6_request_sock_ops __read_mostly = {
 	.syn_ack_timeout =	tcp_syn_ack_timeout,
 };
 
-static void mptcp_v6_reqsk_queue_hash_add(struct sock *meta_sk,
+void mptcp_v6_reqsk_queue_hash_add(struct sock *meta_sk,
 					  struct request_sock *req,
 					  unsigned long timeout)
 {
@@ -136,7 +133,7 @@ static void mptcp_v6_reqsk_queue_hash_add(struct sock *meta_sk,
  *
  * The meta-socket is IPv4, but a new subsocket is IPv6
  */
-static int mptcp_v6v4_send_synack(struct sock *meta_sk, struct request_sock *req,
+int mptcp_v6v4_send_synack(struct sock *meta_sk, struct request_sock *req,
 				  u16 queue_mapping)
 {
 	struct inet_request_sock *treq = inet_rsk(req);
@@ -626,7 +623,7 @@ int mptcp_v6_do_rcv(struct sock *meta_sk, struct sk_buff *skb)
 				goto reset_and_discard;
 			mpcb->list_rcvd = 0;
 
-			mptcp_v6_join_request(meta_sk, skb);
+			tcp_v6_conn_request(meta_sk, skb);
 			goto discard;
 		}
 		goto reset_and_discard;
