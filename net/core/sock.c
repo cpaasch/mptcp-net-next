@@ -122,6 +122,7 @@
 
 #include <linux/netdevice.h>
 #include <net/protocol.h>
+#include <net/transp_v6.h>
 #include <linux/skbuff.h>
 #include <net/net_namespace.h>
 #include <net/request_sock.h>
@@ -131,6 +132,7 @@
 #include <linux/ipsec.h>
 #include <net/cls_cgroup.h>
 #include <net/netprio_cgroup.h>
+#include <net/inet_common.h>
 
 #include <linux/filter.h>
 
@@ -138,6 +140,9 @@
 
 #ifdef CONFIG_INET
 #include <net/tcp.h>
+#ifdef CONFIG_MPTCP
+#include <net/mptcp.h>
+#endif
 #endif
 
 #include <net/busy_poll.h>
@@ -1420,104 +1425,250 @@ static void sk_update_clone(const struct sock *sk, struct sock *newsk)
 }
 
 /**
+*	sk_copy_alloc_and_backup - allocates a new socket  and initializes
+*	fields that may get overriden and are needed as backup after sock_copy
+*
+*	@prot:		tcp prototype
+*	@priority:	allocation priority
+*	@alloc_family:	socket family used for allocation
+*	@sock_family:	actual socket family
+*	@ops:		socket operations pointer
+*/
+static struct sock *sk_copy_alloc_and_backup(struct proto *prot,
+			const gfp_t priority, int alloc_family, int sock_family,
+			const struct inet_connection_sock_af_ops *ops)
+{
+	struct sock *newsk = NULL;
+
+	newsk = sk_prot_alloc(prot, priority, alloc_family);
+	if (!newsk)
+		return NULL;
+
+	/* Save backup members that could be overridden on copy. */
+	newsk->sk_prot			= prot;
+	newsk->sk_prot_creator		= prot;
+	inet_csk(newsk)->icsk_af_ops	= ops;
+	newsk->sk_family		= sock_family;
+
+	return newsk;
+}
+
+/**
+*	sk_copy_allo - allocates a clone-socket
+*/
+static struct sock *sk_copy_alloc(const struct sock *sk,
+			const gfp_t priority, int family, bool exact_copy)
+{
+	struct sock *newsk = NULL;
+
+	if (exact_copy)
+		newsk = sk_prot_alloc(sk->sk_prot, priority, sk->sk_family);
+	else if (family == AF_INET && sk->sk_family == AF_INET)
+		newsk = sk_copy_alloc_and_backup(&tcp_prot, priority, family,
+					AF_INET, &ipv4_specific);
+#if IS_ENABLED(CONFIG_IPV6)
+	else if (family == AF_INET)
+		newsk = sk_copy_alloc_and_backup(&tcpv6_prot, priority, family,
+					AF_INET6, &ipv6_mapped);
+	else
+		newsk = sk_copy_alloc_and_backup(&tcpv6_prot, priority, family,
+					AF_INET6, &ipv6_specific);
+#endif
+
+	return newsk;
+}
+
+/**
+*	sk_raw_copy - copies memory area from initial socket to new one,
+*	excluding the dont_copy area
+*
+*	@nsk:		new socket
+*	@osk:		initial/old socket
+*	@obj_size:	socket object size used as reference
+*/
+static void sk_raw_copy(struct sock *nsk, const struct sock *osk, int obj_size)
+{
+	memcpy(nsk, osk, offsetof(struct sock, sk_dontcopy_begin));
+	memcpy(&nsk->sk_dontcopy_end, &osk->sk_dontcopy_end,
+		obj_size - offsetof(struct sock, sk_dontcopy_end));
+}
+
+/**
+*	sock_copy_2 - performes same operations as sock_copy, with the
+*	difference that it does not copy sk_prot->obj_size-dont_copy bytes,
+*	due to the fact that the clone could not be an exact copy of the initial
+*	socket (for example, in MPTCP we can have IPv6 slave socket cloned from
+*	IPv4 meta-socket) and it restores member after copy, if needed
+*
+*	@nsk:		new socket
+*	@osk:		initial/old socket
+*	@exact_copy:	boolean to indicate whether or not the cloned socket is
+*			an exact copy of the initial one or not (as explained
+*			above, this can depend in MPTCP)
+*/
+static void sock_copy_2(struct sock *nsk, const struct sock *osk,
+		bool exact_copy, bool mptcp)
+{
+#ifdef CONFIG_SECURITY_NETWORK
+	void *sptr = nsk->sk_security;
+#endif
+
+	if (exact_copy)
+		sk_raw_copy(nsk, osk, osk->sk_prot->obj_size);
+	else {
+		/* Backup needed. */
+		int family		= nsk->sk_family;
+		struct proto *prot	= nsk->sk_prot;
+		const struct inet_connection_sock_af_ops *af_ops =
+					inet_csk(nsk)->icsk_af_ops;
+
+		if (osk->sk_family == AF_INET)
+			sk_raw_copy(nsk, osk, sizeof(struct tcp_sock));
+		else
+			sk_raw_copy(nsk, osk, sizeof(struct tcp6_sock));
+
+		/* Restore overridden members. */
+		nsk->sk_family			= family;
+		nsk->sk_prot			= prot;
+		nsk->sk_prot_creator		= prot;
+		inet_csk(nsk)->icsk_af_ops	= af_ops;
+	}
+
+	if (mptcp)
+		nsk->sk_destruct		= inet_sock_destruct;
+
+#ifdef CONFIG_SECURITY_NETWORK
+	nsk->sk_security = sptr;
+	security_sk_clone(osk, nsk);
+#endif
+}
+
+/**
  *	sk_clone_lock - clone a socket, and lock its clone
  *	@sk: the socket to clone
  *	@priority: for allocation (%GFP_KERNEL, %GFP_ATOMIC, etc)
+ *	@exact_copy: indicates whether the new socket exactly inherits the old
+ *	one or not (we need this because in MPTCP we can have an IPv6 inherited
+ *	from IPv4 meta-socket)
  *
  *	Caller must unlock socket even in error path (bh_unlock_sock(newsk))
  */
-struct sock *sk_clone_lock(const struct sock *sk, const gfp_t priority)
+struct sock *sk_clone_lock(const struct sock *sk, const gfp_t priority,
+		 int family, bool exact_copy)
 {
 	struct sock *newsk;
+	struct sk_filter *filter;
+	bool mptcp = sk->sk_protocol == IPPROTO_TCP && tcp_sk(sk)->mpc;
 
-	newsk = sk_prot_alloc(sk->sk_prot, priority, sk->sk_family);
-	if (newsk != NULL) {
-		struct sk_filter *filter;
+	newsk = sk_copy_alloc(sk, priority, family, exact_copy);
+	if (!newsk)
+		return NULL;
 
-		sock_copy(newsk, sk);
+	sock_copy_2(newsk, sk, exact_copy, mptcp);
 
-		/* SANITY */
-		get_net(sock_net(newsk));
-		sk_node_init(&newsk->sk_node);
+	/* SANITY */
+	get_net(sock_net(newsk));
+	sk_node_init(&newsk->sk_node);
+	if (mptcp)
+		sock_lock_init_class_and_name(newsk, "slock-AF_INET-MPTCP",
+					 &meta_slock_key,
+					 "sk_lock-AF_INET-MPTCP",
+					 &meta_key);
+	else
 		sock_lock_init(newsk);
-		bh_lock_sock(newsk);
-		newsk->sk_backlog.head	= newsk->sk_backlog.tail = NULL;
-		newsk->sk_backlog.len = 0;
 
-		atomic_set(&newsk->sk_rmem_alloc, 0);
-		/*
-		 * sk_wmem_alloc set to one (see sk_free() and sock_wfree())
-		 */
-		atomic_set(&newsk->sk_wmem_alloc, 1);
-		atomic_set(&newsk->sk_omem_alloc, 0);
-		skb_queue_head_init(&newsk->sk_receive_queue);
-		skb_queue_head_init(&newsk->sk_write_queue);
+	/* Unlocks are in:
+	*
+	* 1. If we are creating the master-sk
+	*	* on client-side in tcp_rcv_state_process, "case TCP_SYN_SENT"
+	*	* on server-side in tcp_child_process
+	* 2. If we are creating another subsock
+	*	* Also in tcp_child_process
+	*/
+	bh_lock_sock(newsk);
+	newsk->sk_backlog.head	= NULL;
+	newsk->sk_backlog.tail	= NULL;
+	newsk->sk_backlog.len	= 0;
+
+	atomic_set(&newsk->sk_rmem_alloc, 0);
+	/* sk_wmem_alloc set to one (see sk_free() and sock_wfree()) */
+	atomic_set(&newsk->sk_wmem_alloc, 1);
+	atomic_set(&newsk->sk_omem_alloc, 0);
+
+	skb_queue_head_init(&newsk->sk_receive_queue);
+	skb_queue_head_init(&newsk->sk_write_queue);
 #ifdef CONFIG_NET_DMA
-		skb_queue_head_init(&newsk->sk_async_wait_queue);
+	skb_queue_head_init(&newsk->sk_async_wait_queue);
 #endif
 
-		spin_lock_init(&newsk->sk_dst_lock);
-		rwlock_init(&newsk->sk_callback_lock);
-		lockdep_set_class_and_name(&newsk->sk_callback_lock,
-				af_callback_keys + newsk->sk_family,
-				af_family_clock_key_strings[newsk->sk_family]);
+	spin_lock_init(&newsk->sk_dst_lock);
+	rwlock_init(&newsk->sk_callback_lock);
+	lockdep_set_class_and_name(&newsk->sk_callback_lock,
+			af_callback_keys + newsk->sk_family,
+			af_family_clock_key_strings[newsk->sk_family]);
 
-		newsk->sk_dst_cache	= NULL;
-		newsk->sk_wmem_queued	= 0;
-		newsk->sk_forward_alloc = 0;
-		newsk->sk_send_head	= NULL;
-		newsk->sk_userlocks	= sk->sk_userlocks & ~SOCK_BINDPORT_LOCK;
+	newsk->sk_dst_cache	= NULL;
+	newsk->sk_wmem_queued	= 0;
+	newsk->sk_forward_alloc = 0;
+	newsk->sk_send_head	= NULL;
+	newsk->sk_userlocks	= sk->sk_userlocks & ~SOCK_BINDPORT_LOCK;
 
-		sock_reset_flag(newsk, SOCK_DONE);
-		skb_queue_head_init(&newsk->sk_error_queue);
+	if (mptcp) {
+		newsk->sk_rx_dst	= NULL;
+		tcp_sk(newsk)->mptcp	= NULL;
+	}
 
-		filter = rcu_dereference_protected(newsk->sk_filter, 1);
-		if (filter != NULL)
-			sk_filter_charge(newsk, filter);
+	sock_reset_flag(newsk, SOCK_DONE);
+	skb_queue_head_init(&newsk->sk_error_queue);
 
-		if (unlikely(xfrm_sk_clone_policy(newsk))) {
-			/* It is still raw copy of parent, so invalidate
-			 * destructor and make plain sk_free() */
-			newsk->sk_destruct = NULL;
-			bh_unlock_sock(newsk);
-			sk_free(newsk);
-			newsk = NULL;
-			goto out;
-		}
+	filter = rcu_dereference_protected(newsk->sk_filter, 1);
+	if (filter != NULL)
+		sk_filter_charge(newsk, filter);
 
-		newsk->sk_err	   = 0;
-		newsk->sk_priority = 0;
-		/*
-		 * Before updating sk_refcnt, we must commit prior changes to memory
-		 * (Documentation/RCU/rculist_nulls.txt for details)
+	if (unlikely(xfrm_sk_clone_policy(newsk))) {
+		/* It is still raw copy of parent, so invalidate
+		 * destructor and make plain sk_free().
 		 */
-		smp_wmb();
-		atomic_set(&newsk->sk_refcnt, 2);
+		newsk->sk_destruct = NULL;
+		bh_unlock_sock(newsk);
+		sk_free(newsk);
 
-		/*
-		 * Increment the counter in the same struct proto as the master
-		 * sock (sk_refcnt_debug_inc uses newsk->sk_prot->socks, that
-		 * is the same as sk->sk_prot->socks, as this field was copied
-		 * with memcpy).
-		 *
-		 * This _changes_ the previous behaviour, where
-		 * tcp_create_openreq_child always was incrementing the
-		 * equivalent to tcp_prot->socks (inet_sock_nr), so this have
-		 * to be taken into account in all callers. -acme
-		 */
-		sk_refcnt_debug_inc(newsk);
-		sk_set_socket(newsk, NULL);
-		newsk->sk_wq = NULL;
+		return NULL;
+	}
 
+	newsk->sk_err	   = 0;
+	newsk->sk_priority = 0;
+	/* Before updating sk_refcnt, we must commit prior changes to memory
+	 * (Documentation/RCU/rculist_nulls.txt for details)
+	 */
+	smp_wmb();
+	atomic_set(&newsk->sk_refcnt, 2);
+
+	/* Increment the counter in the same struct proto as the master
+	 * sock (sk_refcnt_debug_inc uses newsk->sk_prot->socks, that
+	 * is the same as sk->sk_prot->socks, as this field was copied
+	 * with memcpy).
+	 *
+	 * This _changes_ the previous behaviour, where
+	 * tcp_create_openreq_child always was incrementing the
+	 * equivalent to tcp_prot->socks (inet_sock_nr), so this have
+	 * to be taken into account in all callers. -acme
+	 */
+	sk_refcnt_debug_inc(newsk);
+	sk_set_socket(newsk, NULL);
+	newsk->sk_wq = NULL;
+
+	if (!mptcp)
 		sk_update_clone(sk, newsk);
 
-		if (newsk->sk_prot->sockets_allocated)
+	if (newsk->sk_prot->sockets_allocated)
+		mptcp ?
+			percpu_counter_inc(newsk->sk_prot->sockets_allocated) :
 			sk_sockets_allocated_inc(newsk);
 
-		if (newsk->sk_flags & SK_FLAGS_TIMESTAMP)
-			net_enable_timestamp();
-	}
-out:
+	if (newsk->sk_flags & SK_FLAGS_TIMESTAMP)
+		net_enable_timestamp();
+
 	return newsk;
 }
 EXPORT_SYMBOL_GPL(sk_clone_lock);
