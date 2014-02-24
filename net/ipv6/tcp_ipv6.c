@@ -471,13 +471,16 @@ int tcp_v6_send_synack(struct sock *sk, struct dst_entry *dst,
 		       u16 queue_mapping)
 {
 	struct inet_request_sock *ireq = inet_rsk(req);
-	struct ipv6_pinfo *np = inet6_sk(sk);
 	struct sk_buff *skb;
 	int err = -ENOMEM;
+	bool is_meta = is_meta_sk(sk);
 
 	/* First, grab a route. */
-	if (!dst && (dst = inet6_csk_route_req(sk, fl6, req)) == NULL)
-		goto done;
+	if (dst == NULL) {
+		dst = inet6_csk_route_req(sk, fl6, req, is_meta);
+		if (dst  == NULL)
+			return err;
+	}
 
 	skb = tcp_make_synack(sk, dst, req, NULL);
 
@@ -486,15 +489,25 @@ int tcp_v6_send_synack(struct sock *sk, struct dst_entry *dst,
 				    &ireq->ir_v6_rmt_addr);
 
 		fl6->daddr = ireq->ir_v6_rmt_addr;
-		if (np->repflow && (ireq->pktopts != NULL))
-			fl6->flowlabel = ip6_flowlabel(ipv6_hdr(ireq->pktopts));
 
-		skb_set_queue_mapping(skb, queue_mapping);
-		err = ip6_xmit(sk, skb, fl6, np->opt, np->tclass);
+		if (!is_meta) {
+			struct ipv6_pinfo *np = inet6_sk(sk);
+			if (np->repflow && (ireq->pktopts != NULL))
+				fl6->flowlabel = ip6_flowlabel(
+						ipv6_hdr(ireq->pktopts));
+
+			skb_set_queue_mapping(skb, queue_mapping);
+			err = ip6_xmit(sk, skb, fl6, np->opt, np->tclass);
+		} else {
+			fl6->flowlabel = 0;
+
+			skb_set_queue_mapping(skb, queue_mapping);
+			err = ip6_xmit(sk, skb, fl6, NULL, 0);
+		}
+
 		err = net_xmit_eval(err);
 	}
 
-done:
 	return err;
 }
 
@@ -1105,7 +1118,8 @@ static int tcp_v6_conn_request(struct sock *sk, struct sk_buff *skb)
 		 */
 		if (tmp_opt.saw_tstamp &&
 		    tcp_death_row.sysctl_tw_recycle &&
-		    (dst = inet6_csk_route_req(sk, &fl6, req)) != NULL) {
+		    (dst = inet6_csk_route_req(sk, &fl6, req, is_meta_sk(sk)))
+				!= NULL) {
 			if (!tcp_peer_is_proven(req, dst, true)) {
 				NET_INC_STATS_BH(sock_net(sk), LINUX_MIB_PAWSPASSIVEREJECTED);
 				goto drop_and_release;
@@ -1169,6 +1183,7 @@ struct sock *tcp_v6_syn_recv_sock(struct sock *sk, struct sk_buff *skb,
 	struct tcp_md5sig_key *key;
 #endif
 	struct flowi6 fl6;
+	bool is_meta = is_meta_sk(sk);
 
 	if (skb->protocol == htons(ETH_P_IP)) {
 		/*
@@ -1232,7 +1247,7 @@ struct sock *tcp_v6_syn_recv_sock(struct sock *sk, struct sk_buff *skb,
 		goto out_overflow;
 
 	if (!dst) {
-		dst = inet6_csk_route_req(sk, &fl6, req);
+		dst = inet6_csk_route_req(sk, &fl6, req, is_meta);
 		if (!dst)
 			goto out;
 	}

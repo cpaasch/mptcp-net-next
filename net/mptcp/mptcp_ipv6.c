@@ -99,11 +99,13 @@ static void mptcp_v6_reqsk_destructor(struct request_sock *req)
 /* Similar to tcp_v6_rtx_synack */
 static int mptcp_v6_rtx_synack(struct sock *meta_sk, struct request_sock *req)
 {
+	struct flowi6 fl6;
+
 	if (meta_sk->sk_family == AF_INET6)
 		return tcp_v6_rtx_synack(meta_sk, req);
 
 	TCP_INC_STATS_BH(sock_net(meta_sk), TCP_MIB_RETRANSSEGS);
-	return mptcp_v6v4_send_synack(meta_sk, req, 0);
+	return tcp_v6_send_synack(meta_sk, NULL, &fl6, req, 0);
 }
 
 /* Similar to tcp6_request_sock_ops */
@@ -379,7 +381,8 @@ static void mptcp_v6_join_request(struct sock *meta_sk, struct sk_buff *skb)
 		 */
 		if (tmp_opt.saw_tstamp &&
 		    tcp_death_row.sysctl_tw_recycle &&
-		    (dst = inet6_csk_route_req(meta_sk, &fl6, req)) != NULL) {
+		    (dst = inet6_csk_route_req(meta_sk, &fl6, req, true)) !=
+				NULL) {
 			if (!tcp_peer_is_proven(req, dst, true)) {
 				NET_INC_STATS_BH(sock_net(meta_sk), LINUX_MIB_PAWSPASSIVEREJECTED);
 				goto drop_and_release;
@@ -432,14 +435,13 @@ static void mptcp_v6_join_request(struct sock *meta_sk, struct sk_buff *skb)
 	mtreq->low_prio = mopt.low_prio;
 	tcp_rsk(req)->saw_mpc = 1;
 
-	if (meta_sk->sk_family == AF_INET6) {
-		if (tcp_v6_send_synack(meta_sk, dst, &fl6, req,
-				       skb_get_queue_mapping(skb)))
-			goto drop_and_free;
-	} else {
-		if (mptcp_v6v4_send_synack(meta_sk, req, skb_get_queue_mapping(skb)))
-			goto drop_and_free;
-	}
+	if (meta_sk->sk_family != AF_INET6)
+		dst = NULL;
+
+	if (tcp_v6_send_synack(meta_sk, dst, &fl6, req,
+			skb_get_queue_mapping(skb)))
+		goto drop_and_free;
+
 
 	/* Adding to request queue in metasocket */
 	mptcp_v6_reqsk_queue_hash_add(meta_sk, req, TCP_TIMEOUT_INIT);
