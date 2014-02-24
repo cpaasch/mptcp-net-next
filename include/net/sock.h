@@ -1555,7 +1555,8 @@ struct sock *sk_alloc(struct net *net, int family, gfp_t priority,
 		      struct proto *prot);
 void sk_free(struct sock *sk);
 void sk_release_kernel(struct sock *sk);
-struct sock *sk_clone_lock(const struct sock *sk, const gfp_t priority);
+struct sock *sk_clone_lock(const struct sock *sk, const gfp_t priority,
+			int family, bool exact_copy);
 
 struct sk_buff *sock_wmalloc(struct sock *sk, unsigned long size, int force,
 			     gfp_t priority);

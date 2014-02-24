@@ -669,11 +669,14 @@ struct sock *inet_csk_clone_lock(const struct sock *sk,
 				 const gfp_t priority)
 {
 	struct sock *newsk;
+	int family	= 0;
+	bool exact_copy	= true;
 
-	if (sk->sk_protocol == IPPROTO_TCP && tcp_sk(sk)->mpc)
-		newsk = mptcp_sk_clone(sk, req->rsk_ops->family, priority);
-	else
-		newsk = sk_clone_lock(sk, priority);
+	if (sk->sk_protocol == IPPROTO_TCP && tcp_sk(sk)->mpc) {
+		family		=  req->rsk_ops->family;
+		exact_copy	= false;
+	}
+	newsk = sk_clone_lock(sk, priority, family, exact_copy);
 
 	if (newsk != NULL) {
 		struct inet_connection_sock *newicsk = inet_csk(newsk);

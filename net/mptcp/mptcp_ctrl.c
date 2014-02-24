@@ -917,30 +917,27 @@ int mptcp_alloc_mpcb(struct sock *meta_sk, __u64 remote_key, u32 window)
 	struct sk_buff *skb, *tmp;
 	u64 idsn;
 
-	master_sk = sk_prot_alloc(meta_sk->sk_prot, GFP_ATOMIC | __GFP_ZERO,
-				  meta_sk->sk_family);
-	if (!master_sk)
+	mpcb = kmem_cache_zalloc(mptcp_cb_cache, GFP_ATOMIC);
+	if (!mpcb)
 		return -ENOBUFS;
+
+
+	/* Since sk_clone_lock is generic (TCP and MPTCP), we need to set mpc
+	 * before calling it, in order to be able to determine if we are in TCP
+	 * or MPTCP.
+	 */
+	meta_tp->mpc = 1;
+
+	master_sk = sk_clone_lock(meta_sk, GFP_ATOMIC | __GFP_ZERO, 0, true);
+	if (!master_sk) {
+		meta_tp->mpc = 0;
+		kmem_cache_free(mptcp_cb_cache, mpcb);
+
+		return -ENOBUFS;
+	}
 
 	master_tp = tcp_sk(master_sk);
 	master_icsk = inet_csk(master_sk);
-
-	/* Need to set this here - it is needed by mptcp_inherit_sk */
-	master_sk->sk_prot = meta_sk->sk_prot;
-	master_sk->sk_prot_creator = meta_sk->sk_prot;
-	master_icsk->icsk_af_ops = meta_icsk->icsk_af_ops;
-
-	mpcb = kmem_cache_zalloc(mptcp_cb_cache, GFP_ATOMIC);
-	if (!mpcb) {
-		sk_free(master_sk);
-		return -ENOBUFS;
-	}
-
-	/* master_sk inherits from meta_sk */
-	if (mptcp_inherit_sk(meta_sk, master_sk, meta_sk->sk_family, GFP_ATOMIC)) {
-		kmem_cache_free(mptcp_cb_cache, mpcb);
-		return -ENOBUFS;
-	}
 
 #if IS_ENABLED(CONFIG_IPV6)
 	if (meta_icsk->icsk_af_ops == &ipv6_mapped) {
@@ -1024,7 +1021,6 @@ int mptcp_alloc_mpcb(struct sock *meta_sk, __u64 remote_key, u32 window)
 	mpcb->meta_sk = meta_sk;
 	mpcb->master_sk = master_sk;
 
-	meta_tp->mpc = 1;
 	meta_tp->mptcp->attached = 0;
 	meta_tp->was_meta_sk = 0;
 
