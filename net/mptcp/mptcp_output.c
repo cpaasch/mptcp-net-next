@@ -839,8 +839,10 @@ int mptso_fragment(struct sock *sk, struct sk_buff *skb, unsigned int len,
 		     MPTCP_SUB_LEN_SEQ_ALIGN;
 
 	/* All of a TSO frame must be composed of paged data.  */
-	if (skb->len != skb->data_len)
-		return mptcp_fragment(sk, skb, len, mss_now, reinject);
+	if (skb->len != skb->data_len) {
+		bool reinj = reinject == 1 ? true:false;
+		return tcp_fragment(sk, skb, len, mss_now, reinj);
+	}
 
 	buff = sk_stream_alloc_skb(sk, 0, gfp);
 	if (unlikely(buff == NULL))
@@ -935,7 +937,7 @@ int mptcp_write_wakeup(struct sock *meta_sk)
 		    skb->len > mss) {
 			seg_size = min(seg_size, mss);
 			TCP_SKB_CB(skb)->tcp_flags |= TCPHDR_PSH;
-			if (mptcp_fragment(meta_sk, skb, seg_size, mss, 0))
+			if (tcp_fragment(meta_sk, skb, seg_size, mss, false))
 				return -1;
 		} else if (!tcp_skb_pcount(skb)) {
 			tcp_set_skb_tso_segs(meta_sk, skb, mss);
