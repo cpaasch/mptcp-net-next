@@ -441,6 +441,7 @@ int tcp_v6_send_synack(struct sock *sk, struct dst_entry *dst,
 void tcp_v6_send_reset(struct sock *sk, struct sk_buff *skb);
 int tcp_v6_do_rcv(struct sock *sk, struct sk_buff *skb);
 int tcp_v6_connect(struct sock *sk, struct sockaddr *uaddr, int addr_len);
+int tcp_v6_conn_request(struct sock *sk, struct sk_buff *skb);
 void tcp_v6_destroy_sock(struct sock *sk);
 void inet6_sk_rx_dst_set(struct sock *sk, const struct sk_buff *skb);
 void tcp_v6_hash(struct sock *sk);
