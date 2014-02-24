@@ -89,7 +89,7 @@ struct request_sock_ops mptcp_request_sock_ops __read_mostly = {
 	.syn_ack_timeout =	tcp_syn_ack_timeout,
 };
 
-static void mptcp_v4_reqsk_queue_hash_add(struct sock *meta_sk,
+void mptcp_v4_reqsk_queue_hash_add(struct sock *meta_sk,
 					  struct request_sock *req,
 					  unsigned long timeout)
 {
@@ -405,7 +405,7 @@ int mptcp_v4_do_rcv(struct sock *meta_sk, struct sk_buff *skb)
 				goto reset_and_discard;
 			mpcb->list_rcvd = 0;
 
-			mptcp_v4_join_request(meta_sk, skb);
+			tcp_v4_conn_request(meta_sk, skb);
 			goto discard;
 		}
 		goto reset_and_discard;
