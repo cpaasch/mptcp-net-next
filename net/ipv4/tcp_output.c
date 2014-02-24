@@ -1690,26 +1690,31 @@ bool tcp_may_send_now(struct sock *sk)
  * know that all the data is in scatter-gather pages, and that the
  * packet has never been sent out before (and thus is not cloned).
  */
-static int tso_fragment(struct sock *sk, struct sk_buff *skb, unsigned int len,
-			unsigned int mss_now, gfp_t gfp)
+int tso_fragment(struct sock *sk, struct sk_buff *skb, unsigned int len,
+			unsigned int mss_now, gfp_t gfp, bool reinject)
 {
 	struct sk_buff *buff;
-	int nlen = skb->len - len;
+	int old_factor, nlen = skb->len - len,
+		dsslen = MPTCP_SUB_LEN_DSS_ALIGN + MPTCP_SUB_LEN_ACK_ALIGN +
+			MPTCP_SUB_LEN_SEQ_ALIGN;
 	u8 flags;
-
-	if (tcp_sk(sk)->mpc && mptcp_is_data_seq(skb))
-		mptso_fragment(sk, skb, len, mss_now, gfp, false);
+	bool is_mptcp = tcp_sk(sk)->mpc && mptcp_is_data_seq(skb);
 
 	/* All of a TSO frame must be composed of paged data.  */
 	if (skb->len != skb->data_len)
-		return tcp_fragment(sk, skb, len, mss_now, false);
+		return tcp_fragment(sk, skb, len, mss_now, reinject);
 
 	buff = sk_stream_alloc_skb(sk, 0, gfp);
 	if (unlikely(buff == NULL))
 		return -ENOMEM;
 
-	sk->sk_wmem_queued += buff->truesize;
-	sk_mem_charge(sk, buff->truesize);
+	/* See below - if reinject == 1, the buff will be added to the reinject-
+	 * queue, which is currently not part of the memory-accounting.
+	 */
+	if (!reinject) {
+		sk->sk_wmem_queued += buff->truesize;
+		sk_mem_charge(sk, buff->truesize);
+	}
 	buff->truesize += nlen;
 	skb->truesize -= nlen;
 
@@ -1723,19 +1728,45 @@ static int tso_fragment(struct sock *sk, struct sk_buff *skb, unsigned int len,
 	TCP_SKB_CB(skb)->tcp_flags = flags & ~(TCPHDR_FIN | TCPHDR_PSH);
 	TCP_SKB_CB(buff)->tcp_flags = flags;
 
+	/* Set MPTCP flags. */
+	if (is_mptcp) {
+		flags = TCP_SKB_CB(skb)->mptcp_flags;
+		TCP_SKB_CB(skb)->mptcp_flags = flags & ~(MPTCPHDR_FIN);
+		TCP_SKB_CB(buff)->mptcp_flags = flags;
+	}
+
 	/* This packet was never sent out yet, so no SACK bits. */
 	TCP_SKB_CB(buff)->sacked = 0;
 
 	buff->ip_summed = skb->ip_summed = CHECKSUM_PARTIAL;
 	skb_split(skb, buff, len);
 
+	/* We lost the dss-option when creating buff - put it back! */
+	if (is_mptcp) {
+		if (!is_meta_sk(sk))
+			memcpy(buff->data - dsslen, skb->data - dsslen, dsslen);
+		old_factor = tcp_skb_pcount(skb);
+	}
+
 	/* Fix up tso_factor for both original and new SKB.  */
 	tcp_set_skb_tso_segs(sk, skb, mss_now);
 	tcp_set_skb_tso_segs(sk, buff, mss_now);
 
+	if (is_mptcp && !before(tcp_sk(sk)->snd_nxt, TCP_SKB_CB(buff)->end_seq)
+		&& !reinject) {
+		int diff = old_factor - tcp_skb_pcount(skb) -
+			tcp_skb_pcount(buff);
+
+		if (diff)
+			tcp_adjust_pcount(sk, skb, diff);
+	}
+
 	/* Link BUFF into the send queue. */
 	skb_header_release(buff);
-	tcp_insert_write_queue_after(skb, buff, sk);
+	if (reinject)
+		__skb_queue_after(&tcp_sk(sk)->mpcb->reinject_queue, skb, buff);
+	else
+		tcp_insert_write_queue_after(skb, buff, sk);
 
 	return 0;
 }
@@ -2053,7 +2084,7 @@ static bool tcp_write_xmit(struct sock *sk, unsigned int mss_now, int nonagle,
 						    nonagle);
 
 		if (skb->len > limit &&
-		    unlikely(tso_fragment(sk, skb, limit, mss_now, gfp)))
+		    unlikely(tso_fragment(sk, skb, limit, mss_now, gfp, false)))
 			break;
 
 		TCP_SKB_CB(skb)->when = tcp_time_stamp;

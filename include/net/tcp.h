@@ -473,6 +473,9 @@ int __must_check tcp_queue_rcv(struct sock *sk, struct sk_buff *skb, int hdrlen,
 			       bool *fragstolen);
 bool tcp_try_coalesce(struct sock *sk, struct sk_buff *to,
 		      struct sk_buff *from, bool *fragstolen);
+
+int tso_fragment(struct sock *sk, struct sk_buff *skb, unsigned int len,
+	unsigned int mss_now, gfp_t gfp, bool reinject);
 /**** END - Exports needed for MPTCP ****/
 
 void tcp_tasklet_init(void);

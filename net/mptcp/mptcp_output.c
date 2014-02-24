@@ -1206,7 +1206,8 @@ retry:
 						    nonagle);
 
 		if (skb->len > limit &&
-		    unlikely(mptso_fragment(meta_sk, skb, limit, mss_now, gfp, reinject)))
+		    unlikely(tso_fragment(meta_sk, skb, limit, mss_now, gfp,
+				reinject == 1 ? true:false)))
 			break;
 
 		subskb = mptcp_skb_entail(subsk, skb, reinject);
@@ -1977,8 +1978,8 @@ int mptcp_retransmit_skb(struct sock *meta_sk, struct sk_buff *skb)
 					    0);
 
 	if (skb->len > limit &&
-	    unlikely(mptso_fragment(meta_sk, skb, limit, mss_now,
-				    GFP_ATOMIC, 0)))
+	    unlikely(tso_fragment(meta_sk, skb, limit, mss_now, GFP_ATOMIC,
+			    false)))
 		goto failed;
 
 	subskb = mptcp_skb_entail(subsk, skb, -1);
