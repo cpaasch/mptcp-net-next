@@ -143,7 +143,7 @@ void hci_send_to_sock(struct hci_dev *hdev, struct sk_buff *skb)
 
 		if (!skb_copy) {
 			/* Create a private copy with headroom */
-			skb_copy = __pskb_copy(skb, 1, GFP_ATOMIC);
+			skb_copy = __pskb_copy(skb, 1, GFP_ATOMIC, false);
 			if (!skb_copy)
 				continue;
 
@@ -248,7 +248,7 @@ void hci_send_to_monitor(struct hci_dev *hdev, struct sk_buff *skb)
 
 			/* Create a private copy with headroom */
 			skb_copy = __pskb_copy(skb, HCI_MON_HDR_SIZE,
-					       GFP_ATOMIC);
+					       GFP_ATOMIC, false);
 			if (!skb_copy)
 				continue;
 

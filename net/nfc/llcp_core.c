@@ -679,7 +679,7 @@ void nfc_llcp_send_to_raw_sock(struct nfc_llcp_local *local,
 
 		if (skb_copy == NULL) {
 			skb_copy = __pskb_copy(skb, NFC_LLCP_RAW_HEADER_SIZE,
-					       GFP_ATOMIC);
+					       GFP_ATOMIC, false);
 
 			if (skb_copy == NULL)
 				continue;

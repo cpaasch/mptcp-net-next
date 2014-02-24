@@ -336,7 +336,7 @@ static void __mptcp_reinject_data(struct sk_buff *orig_skb, struct sock *meta_sk
 		 * will be changed when it's going to be reinjected on another
 		 * subflow.
 		 */
-		skb = mptcp_pskb_copy(orig_skb);
+		skb = __pskb_copy(orig_skb, MAX_TCP_HEADER, GFP_ATOMIC, true);
 	} else {
 		__skb_unlink(orig_skb, &sk->sk_write_queue);
 		sock_set_flag(sk, SOCK_QUEUE_SHRUNK);
@@ -536,7 +536,7 @@ static struct sk_buff *mptcp_skb_entail(struct sock *sk, struct sk_buff *skb,
 		TCP_SKB_CB(skb)->mptcp_flags |= (mpcb->snd_hiseq_index ?
 						  MPTCPHDR_SEQ64_INDEX : 0);
 
-	subskb = mptcp_pskb_copy(skb);
+	subskb = __pskb_copy(skb, MAX_TCP_HEADER, GFP_ATOMIC, true);
 	if (!subskb)
 		return NULL;
 
