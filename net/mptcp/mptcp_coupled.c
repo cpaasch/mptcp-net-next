@@ -49,7 +49,7 @@ struct mptcp_ccc {
 
 static inline int mptcp_ccc_sk_can_send(const struct sock *sk)
 {
-	return mptcp_sk_can_send(sk) && tcp_sk(sk)->srtt;
+	return mptcp_sk_can_send(sk) && tcp_sk(sk)->srtt_us;
 }
 
 static inline u64 mptcp_get_alpha(struct sock *meta_sk)
@@ -113,12 +113,13 @@ static void mptcp_ccc_recalc_alpha(struct sock *sk)
 		 * tmp will be in u64.
 		 */
 		tmp = div64_u64(mptcp_ccc_scale(sub_tp->snd_cwnd,
-				alpha_scale_num), sub_tp->srtt * sub_tp->srtt);
+				alpha_scale_num),
+				sub_tp->srtt_us * sub_tp->srtt_us);
 
 		if (tmp >= max_numerator) {
 			max_numerator = tmp;
 			best_cwnd = sub_tp->snd_cwnd;
-			best_rtt = sub_tp->srtt;
+			best_rtt = sub_tp->srtt_us;
 		}
 	}
 
@@ -136,7 +137,7 @@ static void mptcp_ccc_recalc_alpha(struct sock *sk)
 		sum_denominator += div_u64(
 				mptcp_ccc_scale(sub_tp->snd_cwnd,
 						alpha_scale_den) * best_rtt,
-						sub_tp->srtt);
+						sub_tp->srtt_us);
 	}
 	sum_denominator *= sum_denominator;
 	if (unlikely(!sum_denominator)) {
@@ -146,7 +147,7 @@ static void mptcp_ccc_recalc_alpha(struct sock *sk)
 			struct tcp_sock *sub_tp = tcp_sk(sub_sk);
 			pr_err("%s: pi:%d, state:%d\n, rtt:%u, cwnd: %u",
 			       __func__, sub_tp->mptcp->path_index,
-			       sub_sk->sk_state, sub_tp->srtt,
+			       sub_sk->sk_state, sub_tp->srtt_us,
 			       sub_tp->snd_cwnd);
 		}
 	}
@@ -248,7 +249,6 @@ static struct tcp_congestion_ops mptcp_ccc = {
 	.cong_avoid	= mptcp_ccc_cong_avoid,
 	.cwnd_event	= mptcp_ccc_cwnd_event,
 	.set_state	= mptcp_ccc_set_state,
-	.min_cwnd	= tcp_reno_min_cwnd,
 	.owner		= THIS_MODULE,
 	.name		= "coupled",
 };

@@ -402,8 +402,8 @@ struct sock *mptcp_select_ack_sock(const struct sock *meta_sk, int copied)
 		 * current receive-queue.
 		 */
 		if (copied && after(tp->mptcp->last_data_seq, meta_tp->copied_seq - copied)) {
-			if (tp->srtt < min_time) {
-				min_time = tp->srtt;
+			if (tp->srtt_us < min_time) {
+				min_time = tp->srtt_us;
 				subsk = sk;
 				max_data_seq_set = 0;
 			}

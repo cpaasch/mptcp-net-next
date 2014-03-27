@@ -177,7 +177,7 @@ static struct sock *get_available_subflow(struct sock *meta_sk,
 			cnt_backups++;
 
 		if ((tp->mptcp->rcv_low_prio || tp->mptcp->low_prio) &&
-		    tp->srtt < lowprio_min_time_to_peer) {
+		    tp->srtt_us < lowprio_min_time_to_peer) {
 
 			if (!mptcp_is_available(sk, skb, &this_mss))
 				continue;
@@ -188,11 +188,11 @@ static struct sock *get_available_subflow(struct sock *meta_sk,
 				continue;
 			}
 
-			lowprio_min_time_to_peer = tp->srtt;
+			lowprio_min_time_to_peer = tp->srtt_us;
 			lowpriosk = sk;
 			mss_lowprio = this_mss;
 		} else if (!(tp->mptcp->rcv_low_prio || tp->mptcp->low_prio) &&
-			   tp->srtt < min_time_to_peer) {
+			   tp->srtt_us < min_time_to_peer) {
 			if (!mptcp_is_available(sk, skb, &this_mss))
 				continue;
 
@@ -202,7 +202,7 @@ static struct sock *get_available_subflow(struct sock *meta_sk,
 				continue;
 			}
 
-			min_time_to_peer = tp->srtt;
+			min_time_to_peer = tp->srtt_us;
 			bestsk = sk;
 			mss = this_mss;
 		}
@@ -1028,11 +1028,11 @@ static struct sk_buff *mptcp_rcv_buf_optimization(struct sock *sk, int penal)
 		goto retrans;
 
 	/* Half the cwnd of the slow flow */
-	if (tcp_time_stamp - tp->mptcp->last_rbuf_opti >= tp->srtt >> 3) {
+	if (tcp_time_stamp - tp->mptcp->last_rbuf_opti >= tp->srtt_us >> 3) {
 		mptcp_for_each_tp(tp->mpcb, tp_it) {
 			if (tp_it != tp &&
 			    TCP_SKB_CB(skb_head)->path_mask & mptcp_pi_to_flag(tp_it->mptcp->path_index)) {
-				if (tp->srtt < tp_it->srtt && inet_csk((struct sock *)tp_it)->icsk_ca_state == TCP_CA_Open) {
+				if (tp->srtt_us < tp_it->srtt_us && inet_csk((struct sock *)tp_it)->icsk_ca_state == TCP_CA_Open) {
 					tp_it->snd_cwnd = max(tp_it->snd_cwnd >> 1U, 1U);
 					if (tp_it->snd_ssthresh != TCP_INFINITE_SSTHRESH)
 						tp_it->snd_ssthresh = max(tp_it->snd_ssthresh >> 1U, 2U);
@@ -1057,7 +1057,7 @@ retrans:
 					break;
 				}
 
-				if (4 * tp->srtt >= tp_it->srtt) {
+				if (4 * tp->srtt_us >= tp_it->srtt_us) {
 					do_retrans = false;
 					break;
 				} else {
@@ -2211,22 +2211,22 @@ int mptcp_select_size(const struct sock *meta_sk, bool sg)
 int mptcp_check_snd_buf(const struct tcp_sock *tp)
 {
 	struct sock *sk;
-	u32 rtt_max = tp->srtt;
+	u32 rtt_max = tp->srtt_us;
 	u64 bw_est;
 
-	if (!tp->srtt)
+	if (!tp->srtt_us)
 		return tp->reordering + 1;
 
 	mptcp_for_each_sk(tp->mpcb, sk) {
 		if (!mptcp_sk_can_send(sk))
 			continue;
 
-		if (rtt_max < tcp_sk(sk)->srtt)
-			rtt_max = tcp_sk(sk)->srtt;
+		if (rtt_max < tcp_sk(sk)->srtt_us)
+			rtt_max = tcp_sk(sk)->srtt_us;
 	}
 
 	bw_est = div64_u64(((u64)tp->snd_cwnd * rtt_max) << 16,
-				(u64)tp->srtt);
+				(u64)tp->srtt_us);
 
 	return max_t(unsigned int, (u32)(bw_est >> 16),
 			tp->reordering + 1);
