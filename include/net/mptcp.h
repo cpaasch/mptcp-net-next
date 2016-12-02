@@ -456,7 +456,6 @@ extern bool mptcp_init_failed;
 #define MPTCPHDR_SEQ64_SET	0x10 /* Did we received a 64-bit seq number?  */
 #define MPTCPHDR_SEQ64_OFO	0x20 /* Is it not in our circular array? */
 #define MPTCPHDR_DSS_CSUM	0x40
-#define MPTCPHDR_JOIN		0x80
 /* MPTCP flags: TX only */
 #define MPTCPHDR_INF		0x08
 #define MPTCP_REINJECT		0x10 /* Did we reinject this segment? */
@@ -1073,7 +1072,8 @@ static inline int is_meta_tp(const struct tcp_sock *tp)
 
 static inline int is_meta_sk(const struct sock *sk)
 {
-	return sk->sk_type == SOCK_STREAM  && sk->sk_protocol == IPPROTO_TCP &&
+	return sk->sk_state != TCP_NEW_SYN_RECV &&
+	       sk->sk_type == SOCK_STREAM && sk->sk_protocol == IPPROTO_TCP &&
 	       mptcp(tcp_sk(sk)) && mptcp_meta_sk(sk) == sk;
 }
 
